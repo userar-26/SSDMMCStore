@@ -1,0 +1,28 @@
+# CLion
+.idea/
+cmake-build-*/
+*.iml
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build/
+
+# Общие временные файлы
+*.o
+*.obj
+*.exe
+*.out
+*.log
+*.swp
+*.tmp
+
+# Бинарники
+*.bin
+*.elf
+
+# OS
+.DS_Store
+Thumbs.db
