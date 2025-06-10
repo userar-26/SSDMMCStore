@@ -7,7 +7,10 @@ include_directories(include)
 include_directories(src/common)
 
 add_library(kvstore
-        src/key_value_store/kv_store.c)
+        src/key_value_store/kv_store.c
+        src/key_value_store/kvs_init.c
+        src/common/common.c
+        src/key_value_store/kv_store_internal.c)
 
 add_executable(main main.c)
 
