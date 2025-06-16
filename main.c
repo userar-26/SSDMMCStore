@@ -1,6 +1,7 @@
-#include "kv_store.h"
+#include "kvs.h"
+#include "../src/key_value_store/kvs_internal.h"
 
 int main(void) {
-    printf("Hello, World!\n");
+
     return 0;
 }
