@@ -4,20 +4,20 @@ int ssdmmc_sim_read_word(FILE *fp, uint32_t page_num, uint32_t word_offset, void
 {
     // Проверяем не выходят ли запрашиваемые данные за размер хранилища
     if (page_num >= SSDMMC_SIM_PAGE_COUNT)
-        return -1;
+        return SSDMMC_ERR_INVALID_PAGE;
     if (word_offset >= SSDMMC_SIM_WORDS_PER_PAGE)
-        return -2;
+        return SSDMMC_ERR_INVALID_OFFSET;
 
     // Проверяем указатель на файл
     if (fp == NULL)
-        return -3;
+        return SSDMMC_ERR_NULL_POINTER;
 
     // Вычисляем позицию необходимого слова
     uint32_t pos = (page_num * SSDMMC_SIM_WORDS_PER_PAGE + word_offset) * SSDMMC_SIM_WORD_SIZE;
 
     // Переходим в вычисленную позицию
     if (fseeko(fp, pos, SEEK_SET) != 0) {
-        return -4;
+        return SSDMMC_ERR_SEEK_FAILED;
     }
 
     // Считываем слово
@@ -25,29 +25,29 @@ int ssdmmc_sim_read_word(FILE *fp, uint32_t page_num, uint32_t word_offset, void
 
     // Проверяем считались ли запрашиваемые данные
     if (read != SSDMMC_SIM_WORD_SIZE)
-        return -5;
+        return SSDMMC_ERR_IO_FAILED;
 
-    return 0;
+    return SSDMMC_OK;
 }
 
 int ssdmmc_sim_write_word(FILE *fp, uint32_t page_num, uint32_t word_offset, const void *word)
 {
     // Проверяем не выходят ли запрашиваемые данные за размер хранилища
     if (page_num >= SSDMMC_SIM_PAGE_COUNT)
-        return -1;
+        return SSDMMC_ERR_INVALID_PAGE;
     if (word_offset >= SSDMMC_SIM_WORDS_PER_PAGE)
-        return -2;
+        return SSDMMC_ERR_INVALID_OFFSET;
 
     // Проверяем указатель на файл
     if (fp == NULL)
-        return -3;
+        return SSDMMC_ERR_NULL_POINTER;
 
     // Вычисляем позицию необходимого слова
     uint32_t pos = (page_num * SSDMMC_SIM_WORDS_PER_PAGE + word_offset) * SSDMMC_SIM_WORD_SIZE;
 
     // Переходим в вычисленную позицию
     if (fseeko(fp, pos, SEEK_SET) != 0) {
-        return -4;
+        return SSDMMC_ERR_SEEK_FAILED;
     }
 
     // Записываем слово
@@ -55,21 +55,21 @@ int ssdmmc_sim_write_word(FILE *fp, uint32_t page_num, uint32_t word_offset, con
 
     // Проверяем записались ли данные
     if (written != SSDMMC_SIM_WORD_SIZE)
-        return -5;
+        return SSDMMC_ERR_IO_FAILED;
 
     fflush(fp);
-    return 0;
+    return SSDMMC_OK;
 }
 
 int ssdmmc_sim_erase_page(FILE *fp, uint32_t page_num)
 {
     // Проверяем не выходит ли страница за количество страниц
     if (page_num >= SSDMMC_SIM_PAGE_COUNT)
-        return -1;
+        return SSDMMC_ERR_INVALID_PAGE;
 
     // Проверяем указатель на файл
     if (fp == NULL)
-        return -2;
+        return SSDMMC_ERR_NULL_POINTER;
 
     // Вычисляем позицию необходимой страницы
     size_t page_size = SSDMMC_SIM_WORDS_PER_PAGE * SSDMMC_SIM_WORD_SIZE;
@@ -77,13 +77,13 @@ int ssdmmc_sim_erase_page(FILE *fp, uint32_t page_num)
 
     // Переходим в вычисленную позицию
     if (fseeko(fp, pos, SEEK_SET) != 0) {
-        return -3;
+        return SSDMMC_ERR_SEEK_FAILED;
     }
 
     // Выделяем буфер очистки и заполняем его
-    uint8_t *erase_buf = malloc(page_size);
+    uint8_t *erase_buf = calloc(1,page_size);
     if (erase_buf == NULL) {
-        return -4;
+        return SSDMMC_ERR_MALLOC_FAILED;
     }
     memset(erase_buf, 0xFF, page_size);
 
@@ -93,22 +93,24 @@ int ssdmmc_sim_erase_page(FILE *fp, uint32_t page_num)
 
     // Проверяем записались ли данные
     if (written != page_size)
-        return -5;
+        return SSDMMC_ERR_IO_FAILED;
 
     fflush(fp);
-    return 0;
+    return SSDMMC_OK;
 }
 
 int ssdmmc_sim_format(FILE *fp){
-
     // Проверяем указатель на файл
     if(fp == NULL)
-        return -1;
+        return SSDMMC_ERR_NULL_POINTER;
+
+    // Убедимся, что запись будет с самого начала
+    rewind(fp);
 
     // Вычисляем размер хранилища
     uint32_t storage_size_bytes = SSDMMC_SIM_PAGE_COUNT * SSDMMC_SIM_WORD_SIZE * SSDMMC_SIM_WORDS_PER_PAGE;
 
-    // Заполняем биты хранилища значением 0xFF(11111111) блоками по 4096 байт
+    // Заполняем биты хранилища значением 0xFF блоками по 4096 байт
     const size_t buf_size = 4096;
     uint8_t buf[buf_size];
     memset(buf, 0xFF, buf_size);
@@ -119,11 +121,11 @@ int ssdmmc_sim_format(FILE *fp){
         size_t written = fwrite(buf, 1, chunk, fp);
         // Проверяем записалось ли нужное количество байтов
         if (written != chunk) {
-            return -2;
+            return SSDMMC_ERR_IO_FAILED;
         }
         bytes_left -= written;
     }
 
     fflush(fp);
-    return 0;
+    return SSDMMC_OK;
 }

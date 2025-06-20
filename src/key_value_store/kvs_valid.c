@@ -1,101 +1,34 @@
 #include "kvs_valid.h"
+#include "kvs_internal_io.h"
+#include "kvs_metadata.h"
 
-int is_superblock_valid(const kvs_device *dev)
+int is_bitmap_valid()
 {
-    if (!dev)
-        return -1;
-
-    if (dev->superblock.magic != KVS_SUPERBLOCK_MAGIC)
-        return -2;
-
-    uint8_t *data = malloc(KVS_SUPERBLOCK_SIZE);
-    if (!data)
-        return -3;
-
-    // Считываем образ суперблока из файла устройства
-    if (kvs_read_region(dev->fp, 0, data, KVS_SUPERBLOCK_SIZE) < 0) {
-        free(data);
-        return -4;
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
     }
 
-    uint32_t temp_crc = crc32_calc(data, KVS_SUPERBLOCK_SIZE);
-    free(data);
-
-    if (temp_crc != dev->page_crc.superblock_crc) {
-        return -5;
-    }
-
-    return 1;
-}
-
-int is_bitmap_valid(const kvs_device *dev)
-{
-    if (!dev)
-        return -1;
-
-    uint8_t *data = malloc(dev->superblock.bitmap_size_bytes);
-    if (!data)
-        return -3;
-
-    if (kvs_read_region(dev->fp, dev->superblock.bitmap_offset, data, dev->superblock.bitmap_size_bytes) < 0) {
-        free(data);
-        return -4;
-    }
-
-    uint32_t temp_crc = crc32_calc(data, dev->superblock.bitmap_size_bytes);
-    free(data);
-
-    if (temp_crc != dev->page_crc.bitmap_crc) {
+    // Считаем CRC для битовой карты, находящейся в ОЗУ, и сравниваем с прочитанным с диска CRC
+    uint32_t temp_crc = crc32_calc(device->bitmap, device->superblock.bitmap_size_bytes);
+    if (temp_crc != device->page_crc.bitmap_crc) {
         return 0;
     }
 
     return 1;
 }
 
-int is_page_rewrite_count_valid(const kvs_device *dev)
+int is_page_rewrite_count_valid()
 {
-    if (!dev)
-        return -1;
-
-    uint32_t data_size = dev->superblock.page_crc_offset - dev->superblock.page_rewrite_offset;
-
-    uint8_t *data = malloc(data_size );
-    if (!data)
-        return -3;
-
-    if (kvs_read_region(dev->fp, dev->superblock.page_rewrite_offset , data, data_size ) < 0) {
-        free(data);
-        return -4;
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
     }
 
-    uint32_t temp_crc = crc32_calc(data, data_size);
-    free(data);
+    // Вычисляем точный размер области счетчиков
+    uint32_t data_size = device->superblock.page_crc_offset - device->superblock.page_rewrite_offset;
 
-    if (temp_crc != dev->page_crc.rewrite_crc) {
-        return 0;
-    }
-
-    return 1;
-}
-
-int is_metadata_valid(const kvs_device *dev)
-{
-    if (!dev)
-        return -1;
-
-    uint8_t *data = malloc(dev->superblock.metadata_size_bytes);
-    if (!data)
-        return -3;
-
-    if (kvs_read_region(dev->fp, dev->superblock.metadata_offset, data, dev->superblock.metadata_size_bytes) < 0) {
-        free(data);
-        return -4;
-    }
-
-    uint32_t temp_crc = crc32_calc(data, dev->superblock.metadata_size_bytes);
-    free(data);
-
-    if (temp_crc != dev->page_crc.metadata_crc) {
+    // Считаем CRC для данных в ОЗУ и сравниваем с прочитанным с диска CRC
+    uint32_t temp_crc = crc32_calc(device->page_rewrite_count, data_size);
+    if (temp_crc != device->page_crc.rewrite_crc) {
         return 0;
     }
 
@@ -104,36 +37,178 @@ int is_metadata_valid(const kvs_device *dev)
 
 int is_userdata_valid(uint32_t value_offset, uint32_t value_size)
 {
-    if (!device)
-        return -1;
+    // Проверяем базовые условия
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
 
-    uint32_t data_offset = device->superblock.metadata_offset - device->superblock.userdata_size_bytes;
+    // Проверяем, что смещение и размер не выходят за границы области пользовательских данных
+    if (value_size > device->superblock.userdata_size_bytes || value_offset < device->superblock.data_offset || value_offset + value_size > device->superblock.metadata_offset) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
 
-    // Определим первую и последнюю страницу, в которые попадает user data
-    uint32_t first_page = (value_offset + data_offset) / device->superblock.page_size_bytes;
-    uint32_t last_page = (value_offset + data_offset + value_size - 1) / device->superblock.page_size_bytes;
+    // Выделяем временный буфер для чтения одной страницы
+    uint8_t *page = calloc(1,device->superblock.page_size_bytes);
+    if (!page) {
+        return KVS_INTERNAL_ERR_MALLOC_FAILED;
+    }
 
-    uint8_t *page = malloc(device->superblock.page_size_bytes);
-    if (!page)
-        return -2;
+    // Определяем, с какой физической страницы начинаются пользовательские данные
+    uint32_t userdata_start_page = device->superblock.data_offset / device->superblock.page_size_bytes;
 
+    // Вычисляем диапазон страниц для проверки
+    uint32_t first_page = value_offset / device->superblock.page_size_bytes;
+    uint32_t last_page = (value_offset + value_size - 1) / device->superblock.page_size_bytes;
+
+    // В цикле проверяем CRC каждой страницы
     for (uint32_t i = first_page; i <= last_page; i++)
     {
-        // Смещением выбираем нужную страницу
-        uint32_t page_offset = data_offset + i * device->superblock.page_size_bytes;
-        if (kvs_read_region(device->fp, page_offset, page, device->superblock.page_size_bytes) < 0)
-        {
+        uint32_t page_offset = i * device->superblock.page_size_bytes;
+        if (kvs_read_region(device->fp, page_offset, page, device->superblock.page_size_bytes) < 0) {
             free(page);
-            return -3;
+            return KVS_INTERNAL_ERR_READ_FAILED;
         }
-        uint32_t temp_crc = crc32_calc(page, device->superblock.page_size_bytes);
 
-        if (temp_crc != device->page_crc.page_crc[i])
-        {
+        uint32_t temp_crc = crc32_calc(page, device->superblock.page_size_bytes);
+        uint32_t crc_index = i - userdata_start_page;
+
+        if (temp_crc != device->page_crc.page_crc[crc_index]) {
             free(page);
-            return 0;  // Не валидно
+            return 0;
         }
     }
     free(page);
-    return 1; // Все crc совпали, страница валидна
+
+    return 1;
+}
+
+int is_metadata_entry_valid(const kvs_metadata *metadata)
+{
+
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+    if (!metadata) {
+        return KVS_INTERNAL_ERR_NULL_PARAM;
+    }
+
+    // Проверяем, что размеры и смещения находятся в допустимых границах
+    if (metadata->value_size > device->superblock.userdata_size_bytes || metadata->value_offset >= device->superblock.metadata_offset   || metadata->value_offset < device->superblock.data_offset) {
+        return 0;
+    }
+
+    // Проверяем, не является ли область данных просто стертой (состоит из 0xFF)
+    uint32_t aligned_size = align_up(metadata->value_size, device->superblock.word_size_bytes);
+    int empty_check = is_data_region_empty(metadata->value_offset, aligned_size);
+    if (empty_check < 0) {
+        // Возвращаем код ошибки, если чтение не удалось
+        return empty_check;
+    }
+    if (empty_check == 1) {
+        // Область пуста, значит, метаданные невалидны
+        return 0;
+    }
+
+    // Проверяем целостность самих данных по CRC
+    if (is_userdata_valid(metadata->value_offset, metadata->value_size) != 1) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int is_metadata_bitmap_valid()
+{
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+
+    // Считаем CRC для битовой карты в ОЗУ и сравниваем с прочитанным с диска CRC
+    uint32_t temp_crc = crc32_calc(device->metadata_bitmap, device->superblock.metadata_bitmap_size_bytes);
+    if (temp_crc != device->page_crc.metadata_bitmap_crc) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int is_metadata_slot_valid(uint32_t slot_index, kvs_metadata *metadata_out) {
+
+    if (!device || slot_index >= device->superblock.max_key_count || !metadata_out) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+
+    // Читаем слот с диска
+    uint32_t slot_offset = device->superblock.metadata_offset + (slot_index * sizeof(kvs_metadata));
+    if (kvs_read_region(device->fp, slot_offset, metadata_out, sizeof(kvs_metadata)) < 0) {
+        return KVS_INTERNAL_ERR_READ_FAILED;
+    }
+
+    // Считаем CRC и сравниваем с сохраненным
+    uint32_t calculated_crc = crc32_calc(metadata_out, sizeof(kvs_metadata));
+    if (calculated_crc != device->page_crc.metadata_slot_crc[slot_index]) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int is_key_valid(uint32_t key_index)
+{
+
+    if (!device || key_index >= device->key_count) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+
+    // Если флаг = 2, ключ невалиден (в процессе записи произошел сбой)
+    if (device->key_index[key_index].flags == 2) {
+        return 0;
+    }
+
+    // Проверяем целостность слота метаданных по CRC
+    uint32_t moff       = device->key_index[key_index].metadata_offset;
+    uint32_t slot_index = (moff - device->superblock.metadata_offset) / sizeof(kvs_metadata);
+    kvs_metadata cur_metadata;
+    int slot_valid_check = is_metadata_slot_valid(slot_index, &cur_metadata);
+    if (slot_valid_check < 0) {
+        return slot_valid_check;
+    }
+    if (slot_valid_check == 0) {
+        return 0;
+    }
+
+    // Проверяем, что ключ в метаданных на диске совпадает с ключом в key_index
+    if (memcmp(cur_metadata.key, device->key_index[key_index].key, KVS_KEY_SIZE) != 0) {
+        return 0;
+    }
+
+    // Проверяем целостность самих пользовательских данных
+    if (is_userdata_valid(cur_metadata.value_offset, cur_metadata.value_size) != 1) {
+        return 0;
+    }
+
+    // Проверяем, не пересекаются ли данные этого ключа с данными других валидных ключей
+    for (uint32_t i = 0; i < device->key_count; i++) {
+        if (i == key_index)
+            continue;
+        if (device->key_index[i].flags == 2)
+            continue;
+
+        kvs_metadata temp_metadata;
+        if (kvs_read_region(device->fp, device->key_index[i].metadata_offset, &temp_metadata, sizeof(kvs_metadata)) < 0) {
+            return KVS_INTERNAL_ERR_READ_FAILED;
+        }
+
+        uint32_t cur_start  = cur_metadata.value_offset;
+        uint32_t cur_end    = cur_start + cur_metadata.value_size;
+        uint32_t temp_start = temp_metadata.value_offset;
+        uint32_t temp_end   = temp_start + temp_metadata.value_size;
+
+        if (cur_start < temp_end && cur_end > temp_start) {
+            // Найдено пересечение
+            return 0;
+        }
+    }
+
+    return 1;
 }
