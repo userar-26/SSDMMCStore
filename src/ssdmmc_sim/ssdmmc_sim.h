@@ -3,7 +3,16 @@
 
 #include "common.h"
 
-#define SSDMMC_STORAGE_FILENAME "kvs_storage.bin"
+typedef enum {
+    SSDMMC_OK = 0,
+    SSDMMC_ERR_INVALID_PAGE = -1,    // Неверный номер страницы
+    SSDMMC_ERR_INVALID_OFFSET = -2,  // Неверное смещение слова
+    SSDMMC_ERR_NULL_POINTER = -3,    // Передан NULL указатель на файл
+    SSDMMC_ERR_SEEK_FAILED = -4,     // Ошибка позиционирования в файле
+    SSDMMC_ERR_IO_FAILED = -5,       // Ошибка чтения/записи
+    SSDMMC_ERR_MALLOC_FAILED = -6,   // Ошибка выделения памяти
+} ssdmmc_status_t;
+
 
 // Читает одно слово из указанной страницы по смещению.
 //

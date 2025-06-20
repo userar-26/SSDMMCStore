@@ -3,8 +3,8 @@
 
 #include "ssdmmc_sim.h"
 
-#define SSDMMC_SIM_PAGE_COUNT      1024
+#define SSDMMC_SIM_PAGE_COUNT      2048
 #define SSDMMC_SIM_WORD_SIZE       4
-#define SSDMMC_SIM_WORDS_PER_PAGE  64
+#define SSDMMC_SIM_WORDS_PER_PAGE  128
 
 #endif

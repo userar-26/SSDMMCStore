@@ -7,7 +7,6 @@ include_directories(src/common)
 add_library(kvstore
         src/key_value_store/kvs.c
         src/key_value_store/kvs_init.c
-        src/common/common.c
         src/key_value_store/kvs_internal.c
         src/ssdmmc_sim/ssdmmc_sim_info.c
         src/ssdmmc_sim/ssdmmc_sim.c

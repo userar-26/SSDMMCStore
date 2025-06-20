@@ -1,189 +1,450 @@
-
 #include "kvs_metadata.h"
 #include "kvs_internal_io.h"
+#include "kvs_valid.h"
 
 uint32_t crc32_calc(const void *data, size_t size)
 {
     const uint8_t *buf = (const uint8_t *)data;
     uint32_t crc = 0xFFFFFFFF;
 
-    for (size_t i = 0; i < size; ++i) {
+    for (size_t i = 0; i < size; i++) {
         crc ^= buf[i];
         for (int j = 0; j < 8; ++j) {
-            if (crc & 1)
-                crc = (crc >> 1) ^ 0xEDB88320;
-            else
-                crc = crc >> 1;
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
         }
     }
+
     return ~crc;
 }
 
-int crc_update_region(uint32_t offset, uint32_t size)
+kvs_internal_status crc_update_region(uint32_t offset, uint32_t size)
 {
-    if (!device)
-        return -1;
 
-    if ( offset < device->superblock.data_offset)
-        return -2;
-
-    if ( offset >= device->superblock.metadata_offset)
-        return -3;
-
-    if (offset + size > device->superblock.storage_size_bytes)
-        return -3;
-
-    uint32_t page_size = device->superblock.page_size_bytes;
-    uint32_t first_page = offset / page_size;
-    uint32_t last_page = (offset + size - 1) / page_size;
-    uint32_t data_offset = device->superblock.data_offset + first_page * page_size;
-
-    uint8_t *temp_page = malloc(page_size);
-    if (!temp_page)
-        return -4;
-
-    for (uint32_t i = first_page; i <= last_page; i++) {
-        if (kvs_read_region(device->fp, data_offset, temp_page, page_size) < 0) {
-            free(temp_page);
-            return -5;
-        }
-
-        uint32_t temp_crc = crc32_calc(temp_page, page_size);
-
-        device->page_crc.page_crc[i] = temp_crc;
-
-        data_offset += page_size;
+    // Шаг 1: Проверяем базовые параметры
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+    if (offset < device->superblock.data_offset || offset + size > device->superblock.metadata_offset) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
     }
 
+    // Шаг 2: Получаем геометрию страниц из суперблока
+    uint32_t page_size           = device->superblock.page_size_bytes;
+    uint32_t userdata_start_page = device->superblock.data_offset / page_size;
+
+    // Шаг 3: Вычисляем диапазон страниц, которые нужно обновить
+    uint32_t first_page = offset / page_size;
+    uint32_t last_page  = (offset + size - 1) / page_size;
+
+    // Шаг 4: Выделяем временный буфер для чтения одной страницы
+    uint8_t *temp_page = calloc(1,page_size);
+    if (!temp_page) {
+        return KVS_INTERNAL_ERR_MALLOC_FAILED;
+    }
+
+    // Шаг 5: В цикле проходим по каждой затронутой странице
+    for (uint32_t i = first_page; i <= last_page; i++) {
+
+        // Считываем всю страницу в буфер
+        uint32_t current_page_offset = i * page_size;
+        if (kvs_read_region(device->fp, current_page_offset, temp_page, page_size) < 0) {
+            free(temp_page);
+            return KVS_INTERNAL_ERR_READ_FAILED;
+        }
+
+        // Вычисляем CRC для содержимого страницы
+        uint32_t temp_crc = crc32_calc(temp_page, page_size);
+
+        // Вычисляем правильный индекс в массиве CRC и обновляем значение
+        uint32_t crc_index = i - userdata_start_page;
+        device->page_crc.page_crc[crc_index] = temp_crc;
+    }
+
+    // Шаг 6: Освобождаем временный буфер
     free(temp_page);
-    return 0;
+
+    return KVS_INTERNAL_OK;
 }
 
-int rewrite_count_increment_region(uint32_t offset, uint32_t size)
+kvs_internal_status rewrite_count_increment_region(uint32_t offset, uint32_t size)
 {
+    // Проверяем базовые условия
     if (!device)
-        return -1;
-
-    if (offset < device->superblock.data_offset)
-        return -2;
-
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
     if (offset + size > device->superblock.storage_size_bytes)
-        return -3;
-
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
     if (size == 0)
-        return -4;
+        return KVS_INTERNAL_OK;
 
+    // Вычисляем диапазон страниц, счетчики для которых нужно увеличить
+    uint32_t start_tracked_page = device->superblock.data_offset / device->superblock.page_size_bytes;
     uint32_t first_page = offset / device->superblock.page_size_bytes;
     uint32_t last_page  = (offset + size - 1) / device->superblock.page_size_bytes;
 
+    // Увеличиваем счетчики для вычисленных страниц
     for (uint32_t i = first_page; i <= last_page; i++) {
-        device->page_rewrite_count[i]++;
+        uint32_t rewrite_index = i - start_tracked_page;
+        device->page_rewrite_count[rewrite_index]++;
     }
-
-    return 0;
+    return KVS_INTERNAL_OK;
 }
 
-int bitmap_set_region(uint32_t offset, uint32_t size)
+kvs_internal_status bitmap_set_region(uint32_t offset, uint32_t size)
 {
-    if (!device)
-        return -1;
+    // Делаем базовую проверку
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+    if (offset < device->superblock.data_offset || offset + size > device->superblock.metadata_offset) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+    if (size == 0) {
+        return KVS_INTERNAL_OK;
+    }
 
-    if (offset < device->superblock.data_offset)
-        return -2;
+    // Вычисляем начальное слово и количество слов для пометки
+    uint32_t word_size  = device->superblock.word_size_bytes;
+    uint32_t start_word = (offset - device->superblock.data_offset) / word_size;
+    uint32_t num_words  = (size + word_size - 1) / word_size;
 
-    if (offset + size > device->superblock.storage_size_bytes)
-        return -3;
-
-    if (size == 0)
-        return -4;
-
-    uint32_t page_size = device->superblock.page_size_bytes;
-    uint32_t first_page = offset / page_size;
-    uint32_t last_page  = (offset + size - 1) / page_size;
-
-    for (uint32_t i = first_page; i <= last_page; i++) {
-        uint32_t byte_index = i / 8;
-        uint8_t  bit_index  = i % 8;
+    // В цикле устанавливаем каждый соответствующий бит
+    for (uint32_t i = 0; i < num_words; i++) {
+        uint32_t current_word_index = start_word + i;
+        uint32_t byte_index = current_word_index / 8;
+        uint8_t  bit_index  = current_word_index % 8;
         device->bitmap[byte_index] |= (1 << bit_index);
     }
-
-    return 0;
+    return KVS_INTERNAL_OK;
 }
 
-int bitmap_clear_region(uint32_t offset, uint32_t size)
+kvs_internal_status bitmap_clear_region(uint32_t offset, uint32_t size)
 {
-    if (!device)
-        return -1;
+    // Делаем базовую проверку
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+    if (offset < device->superblock.data_offset || offset + size > device->superblock.metadata_offset) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+    if (size == 0) {
+        return KVS_INTERNAL_OK;
+    }
 
-    if (offset < device->superblock.data_offset)
-        return -2;
+    // Вычисляем начальное слово и количество слов для очистки
+    uint32_t word_size  = device->superblock.word_size_bytes;
+    uint32_t start_word = (offset - device->superblock.data_offset) / word_size;
+    uint32_t num_words  = (size + word_size - 1) / word_size;
 
-    if (offset + size > device->superblock.storage_size_bytes)
-        return -3;
-
-    if (size == 0)
-        return -4;
-
-    uint32_t page_size = device->superblock.page_size_bytes;
-    uint32_t first_page = offset / page_size;
-    uint32_t last_page  = (offset + size - 1) / page_size;
-
-    for (uint32_t i = first_page; i <= last_page; i++) {
-        uint32_t byte_index = i / 8;
-        uint8_t  bit_index  = i % 8;
+    // В цикле сбрасываем каждый соответствующий бит
+    for (uint32_t i = 0; i < num_words; i++) {
+        uint32_t current_word_index = start_word + i;
+        uint32_t byte_index = current_word_index / 8;
+        uint8_t  bit_index  = current_word_index % 8;
         device->bitmap[byte_index] &= ~(1 << bit_index);
     }
-
-    return 0;
+    return KVS_INTERNAL_OK;
 }
 
-int kvs_bitmap_create()
+kvs_internal_status kvs_bitmap_create(void)
 {
-    if(!device)
-        return -1;
-    if ( bitmap_clear_region( (device->superblock.metadata_offset - device->superblock.userdata_size_bytes),  device->superblock.userdata_size_bytes) < 0)
-        return -2;
-    if (device->key_count == 0)
-        return 0;
+
+    if(!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+
+    // Сначала полностью очищаем битовую карту в памяти
+    memset(device->bitmap, 0, device->superblock.bitmap_size_bytes);
+    if (device->key_count == 0) {
+        return KVS_INTERNAL_OK;
+    }
 
     kvs_metadata temp;
-
+    // Проходим по всем валидным ключам в key_index
     for(int i = 0; i < device->key_count; i++)
     {
-        if (bitmap_set_region( device->key_index[i].metadata_offset,sizeof(kvs_metadata) ) < 0)
-            return -4;
-        if (kvs_read_region(device->fp,device->key_index[i].metadata_offset,&temp,sizeof(kvs_metadata)) < 0 )
-            return -5;
-        if(bitmap_set_region( temp.value_offset,temp.value_size ) < 0)
-            return -6;
+        // Для каждого ключа читаем его метаданные, чтобы узнать, где лежат его данные
+        if (kvs_read_region(device->fp, device->key_index[i].metadata_offset, &temp, sizeof(kvs_metadata)) < 0) {
+            return KVS_INTERNAL_ERR_READ_FAILED;
+        }
+        // Помечаем область данных этого ключа как занятую
+        if(bitmap_set_region(temp.value_offset, temp.value_size) < 0) {
+            return KVS_INTERNAL_ERR_WRITE_FAILED;
+        }
     }
-
-    return 0;
+    return KVS_INTERNAL_OK;
 }
 
-int build_key_index() {
+kvs_internal_status build_key_index(void) {
 
-    if(!device)
-        return -1;
-
-    device->key_count = 0;
-    uint32_t cur_position = device->superblock.metadata_offset;
-    kvs_metadata temp;
-    for (int i = 0; i < device->superblock.max_key_count; i++) {
-        if (kvs_read_region(device->fp, cur_position, &temp, sizeof(temp)) < 0) {
-            kvs_log("Ошибка: не удалось считать метаданные из файла при построении key_index (позиция %u)", cur_position);
-            return -2;
-        }
-        if (is_metadata_entry_valid(&temp)) {
-            kvs_add_metadata_entry(&temp);
-        }
-        cur_position += sizeof(temp);
+    // Делаем базовую проверку
+    if(!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
     }
-    return 0;
+
+    // Обнуляем текущее значение ключей перед построением
+    device->key_count = 0;
+
+    kvs_metadata temp;
+    // Проходим по всем возможным слотам метаданных
+    for (uint32_t i = 0; i < device->superblock.max_key_count; i++) {
+
+        // Используем биткарту метаданных для быстрой проверки: если слот свободен, пропускаем его.
+        if (!get_bit(device->metadata_bitmap, i)) {
+            continue;
+        }
+
+        // Вычисляем физическое смещение слота напрямую по его индексу i.
+        uint32_t current_position = device->superblock.metadata_offset + (i * sizeof(kvs_metadata));
+
+        // Если бит установлен, читаем слот с диска
+        if (kvs_read_region(device->fp, current_position, &temp, sizeof(temp)) < 0) {
+            return KVS_INTERNAL_ERR_READ_FAILED;
+        }
+
+        // Проверяем, является ли запись в слоте полностью валидной
+        if (is_metadata_entry_valid(&temp)) {
+            // Если да, добавляем ее в key_index в ОЗУ
+            kvs_add_metadata_entry(&temp, current_position);
+        }
+    }
+
+    // После того как все валидные ключи добавлены, сортируем key_index для быстрого поиска
+    if (device->key_count > 0) {
+        qsort(device->key_index, device->key_count, sizeof(kvs_key_index_entry), kvs_key_index_entry_cmp);
+    }
+
+    return KVS_INTERNAL_OK;
 }
 
 int kvs_key_index_entry_cmp(const void *a, const void *b) {
-    const kvs_key_index_entry *tempa = (const kvs_key_index_entry *)a;
-    const kvs_key_index_entry *tempb = (const kvs_key_index_entry *)b;
-    return memcmp(tempa->key, tempb->key, KVS_KEY_SIZE);
+    const kvs_key_index_entry *temp_a = a;
+    const kvs_key_index_entry *temp_b = b;
+    return memcmp(temp_a->key, temp_b->key, KVS_KEY_SIZE);
+}
+
+int get_bit(const uint8_t *bitmap, uint32_t bit)
+{
+    return (bitmap[bit / 8] >> (bit % 8)) & 1;
+}
+
+uint32_t kvs_find_free_data_offset(uint32_t value_len)
+{
+    // Выполняем базовую проверку
+    if (!device) {
+        return UINT32_MAX;
+    }
+
+    // Рассчитываем то количество слов, которое нам нужно выделить
+    uint32_t word_size = device->superblock.word_size_bytes;
+    uint32_t total_words = device->superblock.userdata_size_bytes / word_size;
+    uint32_t words_needed = (value_len + word_size - 1) / word_size;
+
+    if (words_needed > total_words) {
+        return UINT32_MAX;
+    }
+
+    // Будем делать два прохода, для реализации метода выравнивания путем карусели
+    uint32_t start_scan_idx = device->superblock.last_data_word_checked;
+    uint32_t run_length = 0;
+
+    // Проход 1: От последнего найденного места до конца
+    for (uint32_t i = start_scan_idx; i < total_words;i++) {
+        if (get_bit(device->bitmap, i) == 0) {
+            run_length++;
+        } else {
+            // Сбрасываем счетчик, если встретили занятый бит
+            run_length = 0;
+        }
+
+        if (run_length >= words_needed) {
+            uint32_t block_start_idx = i - (words_needed - 1);
+            device->superblock.last_data_word_checked = i;
+            return device->superblock.data_offset + block_start_idx * word_size;
+        }
+    }
+
+    // Проход 2: От начала до последнего найденного места (если в первом проходе не нашли)
+    if (start_scan_idx > 0) {
+        run_length = 0;
+        for (uint32_t i = 0; i < start_scan_idx; i++) {
+            if (get_bit(device->bitmap, i) == 0) {
+                run_length++;
+            } else {
+                run_length = 0;
+            }
+            if (run_length >= words_needed) {
+                uint32_t block_start_idx = i - (words_needed - 1);
+                device->superblock.last_data_word_checked = i;
+                return device->superblock.data_offset + block_start_idx * word_size;
+            }
+        }
+    }
+
+    // Если после двух проходов ничего не найдено
+    return UINT32_MAX;
+}
+
+uint32_t kvs_find_free_metadata_offset(void)
+{
+    // Делаем базовую проверку
+    if (!device) {
+        return UINT32_MAX;
+    }
+
+    uint32_t total_slots = device->superblock.max_key_count;
+
+    // Начинаем поиск с последнего выделенного слота
+    uint32_t start_slot = device->superblock.last_metadata_slot_checked;
+
+    // Проходим по всей биткарте один раз (по кругу)
+    for (uint32_t i = 0; i < total_slots; i++) {
+
+        uint32_t current_slot = (start_slot + i) % total_slots;
+
+        if (!get_bit(device->metadata_bitmap, current_slot)) {
+
+            // Если слот свободен, обновляем карусель и возвращаем его смещение
+            device->superblock.last_metadata_slot_checked = current_slot;
+            return device->superblock.metadata_offset + (current_slot * sizeof(kvs_metadata));
+
+        }
+    }
+
+    return UINT32_MAX;
+}
+
+kvs_internal_status kvs_persist_all_service_data(void)
+{
+    // Делаем базовую проверку
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+
+    // Шаг 1: Пересчитываем CRC для всех служебных областей перед записью
+    device->page_crc.superblock_crc        = crc32_calc(&device->superblock, sizeof(kvs_superblock));
+    device->page_crc.superblock_backup_crc = device->page_crc.superblock_crc;
+    device->page_crc.bitmap_crc            = crc32_calc(device->bitmap, device->superblock.bitmap_size_bytes);
+    device->page_crc.metadata_bitmap_crc   = crc32_calc(device->metadata_bitmap, device->superblock.metadata_bitmap_size_bytes);
+    uint32_t rewrite_size                  = device->superblock.page_crc_offset - device->superblock.page_rewrite_offset;
+    device->page_crc.rewrite_crc           = crc32_calc(device->page_rewrite_count, rewrite_size);
+
+    // Шаг 2: Последовательно записываем каждую служебную область
+    if (kvs_write_region(device->fp, 0, &device->superblock, sizeof(kvs_superblock)) < 0) {
+        return KVS_INTERNAL_ERR_WRITE_FAILED;
+    }
+    if (kvs_write_region(device->fp, device->superblock.superblock_backup_offset, &device->superblock, sizeof(kvs_superblock)) < 0) {
+        return KVS_INTERNAL_ERR_WRITE_FAILED;
+    }
+    if (kvs_write_region(device->fp, device->superblock.bitmap_offset, device->bitmap, device->superblock.bitmap_size_bytes) < 0) {
+        return KVS_INTERNAL_ERR_WRITE_FAILED;
+    }
+    if (kvs_write_region(device->fp, device->superblock.metadata_bitmap_offset, device->metadata_bitmap, device->superblock.metadata_bitmap_size_bytes) < 0) {
+        return KVS_INTERNAL_ERR_WRITE_FAILED;
+    }
+    if (kvs_write_region(device->fp, device->superblock.page_rewrite_offset, device->page_rewrite_count, rewrite_size) < 0) {
+        return KVS_INTERNAL_ERR_WRITE_FAILED;
+    }
+
+    // Шаг 3: Записываем всю обновленную структуру CRC
+    if (kvs_write_crc_info() < 0) {
+        return KVS_INTERNAL_ERR_WRITE_FAILED;
+    }
+
+    // Шаг 4: Принудительно сбрасываем буферы файла на диск
+    fflush(device->fp);
+    return KVS_INTERNAL_OK;
+}
+
+kvs_internal_status bitmap_set_metadata_slot(uint32_t slot_index)
+{
+    if (!device || slot_index >= device->superblock.max_key_count) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+    uint32_t byte_index = slot_index / 8;
+    uint8_t bit_index = slot_index % 8;
+    device->metadata_bitmap[byte_index] |= (1 << bit_index);
+    return KVS_INTERNAL_OK;
+}
+
+kvs_internal_status bitmap_clear_metadata_slot(uint32_t slot_index)
+{
+    if (!device || slot_index >= device->superblock.max_key_count) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+    uint32_t byte_index = slot_index / 8;
+    uint8_t bit_index = slot_index % 8;
+    device->metadata_bitmap[byte_index] &= ~(1 << bit_index);
+    return KVS_INTERNAL_OK;
+}
+
+kvs_internal_status kvs_metadata_bitmap_create(void)
+{
+
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+
+    memset(device->metadata_bitmap, 0, device->superblock.metadata_bitmap_size_bytes);
+    // Проходим по всей области метаданных, и если область размером равным размеру слота метаданных
+    // не пуста, то добавляем данную область в биткарту метаданных
+    for (uint32_t i = 0; i < device->superblock.max_key_count; i++) {
+
+        uint32_t slot_offset = device->superblock.metadata_offset + (i * sizeof(kvs_metadata));
+        int empty_check = is_data_region_empty(slot_offset, sizeof(kvs_metadata));
+
+        if (empty_check < 0) {
+            return empty_check;
+        }
+        if (empty_check == 0) {
+            bitmap_set_metadata_slot(i);
+        }
+
+    }
+    return KVS_INTERNAL_OK;
+}
+
+kvs_internal_status kvs_add_metadata_entry(const kvs_metadata *new_metadata, uint32_t pos)
+{
+    // Делаем базовую проверку
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+    if (new_metadata == NULL) {
+        return KVS_INTERNAL_ERR_NULL_PARAM;
+    }
+    if (device->key_count >= device->superblock.max_key_count) {
+        return KVS_INTERNAL_ERR_KEY_INDEX_FULL;
+    }
+
+    // Добавляем метаданные в key_index
+    kvs_key_index_entry temp;
+    memcpy(temp.key, new_metadata->key, KVS_KEY_SIZE);
+    temp.metadata_offset = pos;
+    temp.flags = 1;
+    device->key_index[device->key_count++] = temp;
+    return KVS_INTERNAL_OK;
+}
+
+kvs_internal_status kvs_update_single_metadata_crc(uint32_t slot_index) {
+
+    // Делаем базовую проверку
+    if (!device || slot_index >= device->superblock.max_key_count) {
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+
+    // Считываем метаданные, соответствующие слоту с индексом slot_index
+    kvs_metadata temp_metadata;
+    uint32_t slot_offset = device->superblock.metadata_offset + (slot_index * sizeof(kvs_metadata));
+    if (kvs_read_region(device->fp, slot_offset, &temp_metadata, sizeof(kvs_metadata)) < 0) {
+        return KVS_INTERNAL_ERR_READ_FAILED;
+    }
+
+    // Записываем полученный CRC для данного слота в соответствующий массив
+    device->page_crc.metadata_slot_crc[slot_index] = crc32_calc(&temp_metadata, sizeof(kvs_metadata));
+    return KVS_INTERNAL_OK;
+}
+
+uint32_t kvs_gc(void){
+    // Пока не реализовано
+    return 0;
 }
