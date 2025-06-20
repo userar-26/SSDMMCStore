@@ -1,9 +1,9 @@
 #include "kvs.h"
 #include "unistd.h"
 
-#define NUM_KEYS 100
+#define NUM_KEYS 10
 #define MAX_SIZE 1024
-#define STORAGE_SIZE (1024 * 24)
+#define STORAGE_SIZE (1024 * 24 * 2)
 
 int main() {
 
