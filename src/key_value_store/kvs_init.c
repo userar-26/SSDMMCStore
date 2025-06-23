@@ -309,11 +309,17 @@ kvs_internal_status kvs_load_existing(void) {
 
 kvs_status kvs_init(size_t storage_size_bytes)
 {
+
+    uint32_t word_size = ssdmmc_sim_get_word_size();
+    size_t real_storage_size_bytes = align_up(storage_size_bytes,word_size);
+
     if (device) {
         kvs_log("Предупреждение: KVS уже инициализирован. Выполняется деинициализация перед новым запуском.");
         kvs_deinit();
     }
+
     kvs_make_data_dir();
+
     FILE *log_fp = fopen(KVS_LOG_FILENAME,"a");
     if(log_fp){
         fprintf(log_fp,"\n------------------------------ НОВЫЙ ЗАПУСК ------------------------------\n\n");
@@ -325,7 +331,7 @@ kvs_status kvs_init(size_t storage_size_bytes)
         return KVS_SUCCESS;
     }
     kvs_log("Существующее хранилище не найдено или повреждено, создаем новое");
-    if (kvs_init_new(storage_size_bytes) == KVS_INTERNAL_OK) {
+    if (kvs_init_new(real_storage_size_bytes) == KVS_INTERNAL_OK) {
         kvs_log("Инициализация завершена: создано новое хранилище");
         return KVS_SUCCESS;
     }

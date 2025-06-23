@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.29)
 project(SSDMMCStore C)
 
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fprofile-arcs -ftest-coverage")
+set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fprofile-arcs")
+
 include_directories(include)
 include_directories(src/common)
 

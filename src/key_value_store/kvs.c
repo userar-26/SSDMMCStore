@@ -178,7 +178,7 @@ kvs_status kvs_get(const void *key, void *value, size_t *value_len)
 
     // Шаг 6: Читаем данные с диска во временный буфер, кратный размеру word_size
     uint32_t aligned_value_len = align_up(temp_metadata.value_size, device->superblock.word_size_bytes);
-    uint8_t *temp_buffer = malloc(aligned_value_len);
+    uint8_t *temp_buffer = calloc(1,aligned_value_len);
     if (!temp_buffer) {
         return KVS_ERROR_STORAGE_FAILURE;
     }
@@ -221,7 +221,7 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
     const void *final_value = value;
     if (aligned_value_len != value_len) {
 
-        padded_buffer = malloc(aligned_value_len);
+        padded_buffer = calloc(1,aligned_value_len);
 
         if (!padded_buffer) {
             return KVS_ERROR_STORAGE_FAILURE;
@@ -235,50 +235,41 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
 
     // Шаг 4: Пытаемся найти место для метаданных. Если не находим, запускаем сборщик мусора.
     uint32_t metadata_offset = kvs_find_free_metadata_offset();
-    if (metadata_offset == UINT32_MAX) {
+    while (metadata_offset == UINT32_MAX){
 
-        kvs_log("Нет места для метаданных, запускаем сборщик мусора...");
+        kvs_log("Нет места для метаданных, запускаем запускаем сборщик мусора...");
 
-        // Проверяем освободил ли сборщик мусора данные
-        if (kvs_gc() == 0) {
+        if(kvs_gc(CLEAN_METADATA) == 0){
+
+            kvs_log("После очистки всего мусора, не нашлось места для метаданных");
             if (padded_buffer)
                 free(padded_buffer);
             return KVS_ERROR_NO_SPACE;
+
         }
 
-        // Повторная попытка после сборки мусора
         metadata_offset = kvs_find_free_metadata_offset();
-        if (metadata_offset == UINT32_MAX) {
-            if (padded_buffer)
-                free(padded_buffer);
-            return KVS_ERROR_NO_SPACE;
-        }
-
     }
 
-    // Пытаемся найти место для данных. Если не находим, запускаем сборщик мусора.
+    // Шаг 5: Пытаемся найти место для данных. Если не находим, запускаем сборщик мусора.
     uint32_t data_offset = kvs_find_free_data_offset(aligned_value_len);
-    if (data_offset == UINT32_MAX) {
+    while (data_offset == UINT32_MAX){
 
         kvs_log("Нет места для данных, запускаем запускаем сборщик мусора...");
 
-        if (kvs_gc() == 0) {
+        if(kvs_gc(CLEAN_DATA) == 0){
+
+            kvs_log("После очистки всего мусора, не нашлось места для данных");
             if (padded_buffer)
                 free(padded_buffer);
             return KVS_ERROR_NO_SPACE;
+
         }
 
-        // Повторная попытка после сборки мусора
         data_offset = kvs_find_free_data_offset(aligned_value_len);
-        if (data_offset == UINT32_MAX) {
-            if (padded_buffer)
-                free(padded_buffer);
-            return KVS_ERROR_NO_SPACE;
-        }
-
     }
 
-    // Шаг 5: Записываем данные и метаданные на диск, изначально помечая данные, как невалидные в ОЗУ
+    // Шаг 6: Записываем данные и метаданные на диск, изначально помечая данные, как невалидные в ОЗУ
     kvs_key_index_entry temp_key_entry;
     memcpy(temp_key_entry.key, key, KVS_KEY_SIZE);
     temp_key_entry.metadata_offset = metadata_offset;
@@ -306,7 +297,7 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
         free(padded_buffer);
     }
 
-    // Шаг 6: Обновляем служебные структуры в ОЗУ, и делаем быструю сортировку key_index
+    // Шаг 7: Обновляем служебные структуры в ОЗУ, и делаем быструю сортировку key_index
     qsort(device->key_index, device->key_count, sizeof(kvs_key_index_entry), kvs_key_index_entry_cmp);
     uint32_t slot_index = (metadata_offset - device->superblock.metadata_offset) / sizeof(kvs_metadata);
     for (uint32_t i = 0; i < device->key_count; i++) {

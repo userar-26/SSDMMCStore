@@ -43,10 +43,9 @@ int is_userdata_valid(uint32_t value_offset, uint32_t value_size)
     }
 
     // Проверяем, что смещение и размер не выходят за границы области пользовательских данных
-    if (value_size > device->superblock.userdata_size_bytes || value_offset < device->superblock.data_offset || value_offset + value_size > device->superblock.metadata_offset) {
+    if (value_offset < device->superblock.data_offset || value_offset + value_size > device->superblock.metadata_offset) {
         return KVS_INTERNAL_ERR_INVALID_PARAM;
     }
-
     // Выделяем временный буфер для чтения одной страницы
     uint8_t *page = calloc(1,device->superblock.page_size_bytes);
     if (!page) {
@@ -78,7 +77,6 @@ int is_userdata_valid(uint32_t value_offset, uint32_t value_size)
         }
     }
     free(page);
-
     return 1;
 }
 
@@ -98,6 +96,7 @@ int is_metadata_entry_valid(const kvs_metadata *metadata)
     }
 
     // Проверяем, не является ли область данных просто стертой (состоит из 0xFF)
+    // Используем выровненный размер, так как именно столько места было реально занято на диске
     uint32_t aligned_size = align_up(metadata->value_size, device->superblock.word_size_bytes);
     int empty_check = is_data_region_empty(metadata->value_offset, aligned_size);
     if (empty_check < 0) {
@@ -110,7 +109,8 @@ int is_metadata_entry_valid(const kvs_metadata *metadata)
     }
 
     // Проверяем целостность самих данных по CRC
-    if (is_userdata_valid(metadata->value_offset, metadata->value_size) != 1) {
+    // Передаем выровненный размер, чтобы is_userdata_valid проверила все нужные страницы
+    if (is_userdata_valid(metadata->value_offset, aligned_size) != 1) {
         return 0;
     }
 
@@ -183,31 +183,10 @@ int is_key_valid(uint32_t key_index)
     }
 
     // Проверяем целостность самих пользовательских данных
-    if (is_userdata_valid(cur_metadata.value_offset, cur_metadata.value_size) != 1) {
+    // Используем выровненный размер, чтобы гарантировать проверку всех страниц, затронутых при записи.
+    uint32_t aligned_size = align_up(cur_metadata.value_size, device->superblock.word_size_bytes);
+    if (is_userdata_valid(cur_metadata.value_offset, aligned_size) != 1) {
         return 0;
-    }
-
-    // Проверяем, не пересекаются ли данные этого ключа с данными других валидных ключей
-    for (uint32_t i = 0; i < device->key_count; i++) {
-        if (i == key_index)
-            continue;
-        if (device->key_index[i].flags == 2)
-            continue;
-
-        kvs_metadata temp_metadata;
-        if (kvs_read_region(device->fp, device->key_index[i].metadata_offset, &temp_metadata, sizeof(kvs_metadata)) < 0) {
-            return KVS_INTERNAL_ERR_READ_FAILED;
-        }
-
-        uint32_t cur_start  = cur_metadata.value_offset;
-        uint32_t cur_end    = cur_start + cur_metadata.value_size;
-        uint32_t temp_start = temp_metadata.value_offset;
-        uint32_t temp_end   = temp_start + temp_metadata.value_size;
-
-        if (cur_start < temp_end && cur_end > temp_start) {
-            // Найдено пересечение
-            return 0;
-        }
     }
 
     return 1;

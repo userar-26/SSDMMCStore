@@ -192,7 +192,6 @@ kvs_internal_status build_key_index(void) {
         if (!get_bit(device->metadata_bitmap, i)) {
             continue;
         }
-
         // Вычисляем физическое смещение слота напрямую по его индексу i.
         uint32_t current_position = device->superblock.metadata_offset + (i * sizeof(kvs_metadata));
 
@@ -444,7 +443,248 @@ kvs_internal_status kvs_update_single_metadata_crc(uint32_t slot_index) {
     return KVS_INTERNAL_OK;
 }
 
-uint32_t kvs_gc(void){
-    // Пока не реализовано
+uint32_t kvs_find_victim_page(int clean_mod, const uint8_t *valid_bitmap, uint32_t bitmap_size_bytes, uint32_t *total_valid_size_out) {
+
+    if (!device || !valid_bitmap || !total_valid_size_out) {
+        return UINT32_MAX;
+    }
+
+    // Шаг 1: Определяем параметры в зависимости от режима
+    const uint8_t *real_usage_bitmap;
+    uint32_t page_count;
+    uint32_t words_per_page;
+    uint32_t word_size;
+    uint32_t start_page_global_num;
+    uint32_t total_words_in_area = bitmap_size_bytes * 8;
+
+    if (clean_mod == CLEAN_DATA) {
+
+        if (bitmap_size_bytes != device->superblock.bitmap_size_bytes)
+            return UINT32_MAX;
+
+        real_usage_bitmap     = device->bitmap;
+        page_count            = device->superblock.userdata_page_count;
+        words_per_page        = device->superblock.words_per_page;
+        word_size             = device->superblock.word_size_bytes;
+        start_page_global_num = device->superblock.data_offset / device->superblock.page_size_bytes;
+
+    } else if (clean_mod == CLEAN_METADATA) {
+
+        if (bitmap_size_bytes != device->superblock.metadata_bitmap_size_bytes)
+            return UINT32_MAX;
+
+        real_usage_bitmap     = device->metadata_bitmap;
+        uint32_t page_size    = device->superblock.page_size_bytes;
+        word_size             = sizeof(kvs_metadata);
+        words_per_page        = page_size / word_size;
+        page_count            = (device->superblock.metadata_size_bytes + page_size - 1) / page_size;
+        start_page_global_num = device->superblock.metadata_offset / page_size;
+
+    } else {
+        return UINT32_MAX;
+    }
+
+    // Шаг 2: Ищем максимально грязную страницу, проходясь по всем слова страницы
+    // ищем слова, которые будут считаться невалидными и также не будут пустыми
+    uint32_t victim_page = UINT32_MAX;
+    uint32_t max_garbage_words = 0;
+    *total_valid_size_out = 0;
+
+    for (uint32_t p = 0; p < page_count; p++) {
+        uint32_t garbage_words_on_page = 0;
+        uint32_t valid_words_on_page = 0;
+        uint32_t start_word_index = p * words_per_page;
+
+        for (uint32_t w = 0; w < words_per_page; w++) {
+            uint32_t current_word_index = start_word_index + w;
+            if (current_word_index >= total_words_in_area) break;
+
+            bool is_used_in_reality    = get_bit(real_usage_bitmap, current_word_index);
+            bool is_used_by_valid_data = get_bit(valid_bitmap, current_word_index);
+
+            // Мусор - это то, что помечено как используемое, но не является валидным.
+            if (is_used_in_reality && !is_used_by_valid_data) {
+                garbage_words_on_page++;
+            } else if (is_used_by_valid_data) {
+                valid_words_on_page++;
+            }
+        }
+
+        // Обновляем данные, если нашли более "грязную" страницу
+        if (garbage_words_on_page > max_garbage_words) {
+            max_garbage_words = garbage_words_on_page;
+            victim_page = p + start_page_global_num;
+            *total_valid_size_out = valid_words_on_page * word_size;
+        }
+    }
+
+    if (max_garbage_words == 0) {
+        // Мусор не найден
+        return UINT32_MAX;
+    }
+
+    return victim_page;
+}
+
+uint32_t kvs_gc(int clean_mod){
+
+    if(!device)
+        return 0;
+
+    if (clean_mod == CLEAN_DATA){
+
+        // Фаза 1: Анализ и поиск страницы-жертвы
+        uint32_t bitmap_size = device->superblock.bitmap_size_bytes;
+        uint8_t *valid_bitmap = malloc(bitmap_size);
+        if (!valid_bitmap) {
+            kvs_log("GC Ошибка: не удалось выделить память для valid_bitmap.");
+            return 0;
+        }
+        memset(valid_bitmap, 0, bitmap_size);
+
+        // Заполняем биткарту, в которой: 1 - слово валидно, 0 - слово невалидно
+        for( int i = 0; i < device->key_count; i++ ) {
+
+            if(is_key_valid(i) == 1){
+
+                kvs_metadata temp;
+                if(kvs_read_region(device->fp, device->key_index[i].metadata_offset, &temp, sizeof(kvs_metadata)) < 0)
+                    continue;
+
+                uint32_t word_size  = device->superblock.word_size_bytes;
+                uint32_t start_word = (temp.value_offset - device->superblock.data_offset) / word_size;
+                uint32_t num_words  = align_up(temp.value_size, word_size) / word_size;
+
+                for (uint32_t k = 0; k < num_words; k++) {
+                    uint32_t current_word_index = start_word + k;
+                    if ((current_word_index / 8) >= bitmap_size) continue;
+                    uint32_t byte_index = current_word_index / 8;
+                    uint8_t  bit_index  = current_word_index % 8;
+                    valid_bitmap[byte_index] |= (1 << bit_index);
+                }
+
+            }
+
+        }
+
+        // Находим страницу в которой максимальное количество невалидных данных
+        // live_data_on_page - размер валидных данных на странице
+        uint32_t live_data_on_page = 0;
+        uint32_t victim_page = kvs_find_victim_page(CLEAN_DATA, valid_bitmap, bitmap_size, &live_data_on_page);
+
+        free(valid_bitmap);
+
+        if(victim_page == UINT32_MAX){
+            kvs_log("GC: Не найдено подходящих для очистки страниц данных.");
+            return 0;
+        }
+
+        uint32_t victim_page_start = victim_page * device->superblock.page_size_bytes;
+
+        if(live_data_on_page == 0){
+            kvs_log("GC: Страница #%u не содержит живых данных. Просто стираем.", victim_page);
+            if( ssdmmc_sim_erase_page(device->fp, victim_page) < 0 )
+                return 0;
+
+            rewrite_count_increment_region(victim_page_start, device->superblock.page_size_bytes);
+            bitmap_clear_region(victim_page_start, device->superblock.page_size_bytes);
+            crc_update_region(victim_page_start, device->superblock.page_size_bytes);
+
+            return kvs_persist_all_service_data() == KVS_INTERNAL_OK ? device->superblock.page_size_bytes : 0;
+        }
+
+        // Фаза 2: Подготовка к эвакуации
+        uint32_t new_base_offset = kvs_find_free_data_offset(live_data_on_page);
+        if(new_base_offset == UINT32_MAX){
+            kvs_log("GC Ошибка: нет места для эвакуации %u байт живых данных.", live_data_on_page);
+            return 0;
+        }
+
+        gc_item  items_to_move[device->key_count];
+        uint32_t items_count = 0;
+        uint32_t buffer_offset_counter = 0;
+        uint32_t victim_page_end = victim_page_start + device->superblock.page_size_bytes;
+
+        for( int i = 0; i < device->key_count; i++){
+
+            if(is_key_valid(i) != 1)
+                continue;
+
+            // Считываем метаданные, в которых есть невалидные данные
+            kvs_metadata temp;
+            if(kvs_read_region(device->fp, device->key_index[i].metadata_offset, &temp, sizeof(kvs_metadata)) < 0) continue;
+
+            // Если данные находятся в странице, которую мы собрались очищать,
+            // то добавляем их в массив эвакуации
+            if(temp.value_offset >= victim_page_start && temp.value_offset < victim_page_end){
+                items_to_move[items_count].metadata_offset    = device->key_index[i].metadata_offset;
+                items_to_move[items_count].old_value_offset   = temp.value_offset;
+                items_to_move[items_count].aligned_value_size = align_up(temp.value_size, device->superblock.word_size_bytes);
+                items_to_move[items_count].offset_in_buffer   = buffer_offset_counter;
+
+                buffer_offset_counter += items_to_move[items_count].aligned_value_size;
+                items_count++;
+            }
+
+        }
+
+        // Фаза 3: Выполнение эвакуации
+        if (items_count > 0) {
+            uint8_t *evacuation_buffer = malloc(live_data_on_page);
+            if (!evacuation_buffer)
+                return 0;
+
+            // Считываем в буфер спасаемые данные со страницы
+            for (uint32_t i = 0; i < items_count; i++) {
+                kvs_read_region(device->fp, items_to_move[i].old_value_offset, evacuation_buffer + items_to_move[i].offset_in_buffer, items_to_move[i].aligned_value_size);
+            }
+
+            // Записываем спасенные данные в новое место
+            if (kvs_write_region(device->fp, new_base_offset, evacuation_buffer, live_data_on_page) < 0) {
+                free(evacuation_buffer);
+                return 0;
+            }
+
+            // Очищаем страницу, с которой спасли данные
+            if(ssdmmc_sim_erase_page(device->fp, victim_page) < 0) {
+                free(evacuation_buffer);
+                return 0;
+            }
+
+            free(evacuation_buffer);
+
+            // Фаза 4: Обновление всех необходимых служебных данных
+            for (uint32_t i = 0; i < items_count; i++) {
+                kvs_metadata temp;
+                if(kvs_read_region(device->fp, items_to_move[i].metadata_offset, &temp, sizeof(kvs_metadata)) < 0)
+                    continue;
+                temp.value_offset = new_base_offset + items_to_move[i].offset_in_buffer;
+                if(kvs_write_region(device->fp, items_to_move[i].metadata_offset, &temp, sizeof(kvs_metadata)) < 0)
+                    continue;
+                uint32_t slot_index = (items_to_move[i].metadata_offset - device->superblock.metadata_offset) / sizeof(kvs_metadata);
+                kvs_update_single_metadata_crc(slot_index);
+            }
+        }
+
+        bitmap_clear_region(victim_page_start, device->superblock.page_size_bytes);
+        bitmap_set_region(new_base_offset, live_data_on_page);
+        rewrite_count_increment_region(victim_page_start, device->superblock.page_size_bytes);
+        rewrite_count_increment_region(new_base_offset, live_data_on_page);
+        crc_update_region(new_base_offset, live_data_on_page);
+
+        if(kvs_persist_all_service_data() != KVS_INTERNAL_OK)
+            return 0;
+
+        kvs_log("GC: Сборка мусора для данных успешно завершена.");
+        return device->superblock.page_size_bytes;
+
+    }
+    else if (clean_mod == CLEAN_METADATA){
+
+    }
+    else {
+        kvs_log("Ошибка GC: Указан неверный режим очистки данных");
+    }
+
     return 0;
 }

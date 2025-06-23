@@ -40,6 +40,9 @@
 #include "kvs.h"
 #include "../ssdmmc_sim/ssdmmc_sim.h"
 
+#define CLEAN_DATA     1
+#define CLEAN_METADATA 2
+
 #define KVS_MIN_NUM_METADATA      16
 #define KVS_KEY_SIZE              128
 #define KVS_SUPERBLOCK_SIZE       256

@@ -1,73 +1,48 @@
 #include "kvs.h"
-#include "unistd.h"
 
-#define NUM_KEYS 10
-#define MAX_SIZE 1024
-#define STORAGE_SIZE (1024 * 24 * 2)
+#define STORAGE_SIZE (1024 * 24)
 
 int main() {
 
-    unlink("../data/kvs_storage.bin");
+    char key[KVS_KEY_SIZE];
+    snprintf(key,KVS_KEY_SIZE,"%s","key");
+    char data[1024],data2[1024];
+    snprintf(data,1024,"%s","data");
 
-    srand(time(NULL));
     kvs_init(STORAGE_SIZE);
 
-    char data_buf[NUM_KEYS][MAX_SIZE];
-    size_t  rand_size[NUM_KEYS];
-    char key[NUM_KEYS][KVS_KEY_SIZE];
-    char **rand_data_buf = NULL;
+    kvs_put(key,KVS_KEY_SIZE,data,1024);
 
-    for(int i=0;i<NUM_KEYS;i++){
-        snprintf(key[i],KVS_KEY_SIZE,"key%d",i);
-    }
-    for(int i=0;i<NUM_KEYS;i++){
-        rand_size[i]=rand()%(1024-200)+200;
-    }
-
-    rand_data_buf = calloc(NUM_KEYS,sizeof(char *));
-    if(!rand_data_buf)
-        return 1;
-
-    for(int i=0;i<NUM_KEYS;i++){
-        rand_data_buf[i] = calloc(1,rand_size[i]);
-        if(!rand_data_buf[i]){
-            free(rand_data_buf);
-            return 1;
-        }
-        snprintf(rand_data_buf[i],rand_size[i],"data%d",i);
-    }
-
-    printf("\nПроверяем работоспособность kvs_put\n\n");
-    for(int i=0;i<NUM_KEYS;i++){
-        if(kvs_put(key[i],KVS_KEY_SIZE,rand_data_buf[i],rand_size[i]) == 0){
-            printf("Ключ: %5s с данными %10s, размером %5lu был добавлен в хранилище\n", key[i],rand_data_buf[i],rand_size[i]);
-        }
-    }
-    printf("\nПроверяем существование записанных данных до деинициализации\n\n");
-    for(int i=0;i<NUM_KEYS;i++){
-        if(kvs_exists(key[i])){
-            if(kvs_get(key[i],data_buf[i],&rand_size[i]) == 0){
-                printf("Ключ: %5s с данными %10s, размером %5lu был считан из хранилища\n", key[i],rand_data_buf[i],rand_size[i]);
-            }
-        }
-    }
-
-    printf("\nПеред деинициализацией удаляем ключ %s\n\n",key[0]);
-    kvs_delete(key[0]);
-
-    kvs_deinit();
-    kvs_init(STORAGE_SIZE);
-
-    printf("После деинициализации проверяем данные\n\n");
-
-    for(int i=0;i<NUM_KEYS;i++){
-        if(kvs_exists(key[i])){
-            if(kvs_get(key[i],data_buf[i],&rand_size[i]) == 0){
-                printf("Ключ: %5s с данными %10s, размером %5lu был считан из хранилища\n", key[i],rand_data_buf[i],rand_size[i]);
-            }
-        }
+    if(kvs_exists(key) == 1){
+        size_t size = 1024;
+        kvs_get(key,data2,&size);
+        printf("Ключ: %s с данными %s размером %lu - существует\n\n",key,data2,size);
     }
 
     kvs_deinit();
 
+    kvs_init(STORAGE_SIZE);
+
+    if(kvs_exists(key) == 1){
+        size_t size = 1024;
+        kvs_get(key,data2,&size);
+        printf("Ключ: %s с данными %s размером %lu - существует\n\n",key,data2,size);
+    }
+
+    kvs_delete(key);
+
+    kvs_deinit();
+
+    kvs_init(STORAGE_SIZE);
+
+    if(kvs_exists(key) == 1){
+        size_t size = 1024;
+        kvs_get(key,data2,&size);
+        printf("Ключ: %s с данными %s размером %lu - существует\n\n",key,data2,size);
+    }
+    else{
+        printf("Ключ: %s - не существует\n",key);
+    }
+
+    kvs_deinit();
 }

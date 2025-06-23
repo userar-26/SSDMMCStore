@@ -5,6 +5,16 @@
 #include "kvs_valid.h"
 #include "kvs_internal.h"
 
+// Вспомогательная структура для безопасной эвакуации данных(нужна для GC)
+typedef struct {
+    uint32_t key_index_pos;      // Индекс ключа в device->key_index
+    uint32_t metadata_offset;    // Смещение метаданных
+    uint32_t old_value_offset;   // Старое смещение данных
+    uint32_t value_size;         // Размер данных (невыровненный)
+    uint32_t aligned_value_size; // Размер данных (выровненный)
+    uint32_t offset_in_buffer;   // Смещение этого элемента в общем буфере эвакуации
+} gc_item;
+
 // Пересчитывает CRC для всех страниц, которые полностью или частично покрываются диапазоном [offset, offset + size).
 // Для каждой такой страницы функция:
 //   1. Считывает всю страницу из устройства во временный буфер.
@@ -34,8 +44,9 @@ kvs_internal_status bitmap_set_region(uint32_t offset, uint32_t size);
 kvs_internal_status bitmap_clear_region(uint32_t offset, uint32_t size);
 
 // Выполняет сборку мусора на устройстве хранения SSDMMC-симулятора.
+// clean_mod - переменная, значение которой определяет, какие данные будут очищены
 // Возвращает количество байт, которые были очищены в ходе сборки мусора.
-uint32_t kvs_gc(void);
+uint32_t kvs_gc(int clean_mod);
 
 // Добавляет новую запись о ключе в key_index, который хранится в ОЗУ.
 // Вызывается при загрузке хранилища для построения key_index по валидным метаданным.
@@ -102,6 +113,14 @@ kvs_internal_status kvs_update_single_metadata_crc(uint32_t slot_index);
 // bitmap - биткарта у которой нужно узнать значение бита
 // bit    - номер бита, который нужно узнать
 int get_bit(const uint8_t *bitmap, uint32_t bit);
+
+// Находит страницу с наибольшим количеством мусора для последующей очистки.
+// clean_mod         - Режим работы, определяющий область поиска (CLEAN_DATA или CLEAN_METADATA).
+// valid_bitmap      - Карта, где бит 1 означает, что слово/слот занято валидными данными.
+// bitmap_size_bytes - Размер карты valid_bitmap в байтах.
+// total_valid_size_out - Указатель для возврата общего размера "живых" данных на найденной странице.
+// Возвращает:      Глобальный номер страницы-жертвы или UINT32_MAX, если мусор не найден.
+uint32_t kvs_find_victim_page(int clean_mod, const uint8_t *valid_bitmap, uint32_t bitmap_size_bytes, uint32_t *total_valid_size_out);
 
 
 #endif //SSDMMCSTORE_KVS_METADATA_H
