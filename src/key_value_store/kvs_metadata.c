@@ -739,7 +739,7 @@ uint32_t kvs_gc(int clean_mod){
                 }
             }
 
-            // Стираем старую страницу ПОСЛЕ того, как скопировали из нее все живое
+            // Стираем старую страницу после того, как скопировали из нее все живое
             if (ssdmmc_sim_erase_page(device->fp, victim_page) < 0) {
                 free(evacuation_buffer);
                 free(valid_metadata_bitmap);
