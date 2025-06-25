@@ -122,5 +122,15 @@ int get_bit(const uint8_t *bitmap, uint32_t bit);
 // Возвращает:      Глобальный номер страницы-жертвы или UINT32_MAX, если мусор не найден.
 uint32_t kvs_find_victim_page(int clean_mod, const uint8_t *valid_bitmap, uint32_t bitmap_size_bytes, uint32_t *total_valid_size_out);
 
+// Проверяет, действительно ли все слова в указанном регионе, которые должны быть
+// свободными согласно биткарте, являются пустыми (0xFF). Если обнаруживаются
+// расхождения, инициирует принудительную очистку страниц в этом регионе.
+//
+// offset - смещение (в байтах) региона для проверки.
+// size   - размер региона в байтах.
+//
+// Возвращает 0, если регион чист или был успешно очищен, или код ошибки.
+kvs_internal_status kvs_verify_and_prepare_region(uint32_t offset, uint32_t size);
+
 
 #endif //SSDMMCSTORE_KVS_METADATA_H

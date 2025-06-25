@@ -6,14 +6,16 @@
 // Коды состояния KVS.
 // Эти значения возвращаются пользовательскими функциями API.
 typedef enum {
-    KVS_SUCCESS = 0,                 // Операция успешно завершена
-    KVS_ERROR_NOT_INITIALIZED = -1,  // Библиотека не была инициализирована
-    KVS_ERROR_INVALID_PARAM = -2,    // Передан некорректный параметр (например, NULL, неверный размер)
-    KVS_ERROR_KEY_NOT_FOUND = -3,    // Указанный ключ не найден
-    KVS_ERROR_BUFFER_TOO_SMALL = -4, // Буфер для чтения значения слишком мал
-    KVS_ERROR_NO_SPACE = -5,         // В хранилище недостаточно места для записи
-    KVS_ERROR_STORAGE_FAILURE = -6,  // Неустранимая ошибка хранилища (повреждение данных, ошибка I/O)
-    KVS_ERROR_UNKNOWN = -7           // Неизвестная/неспецифическая ошибка
+    KVS_SUCCESS = 0,                    // Операция успешно завершена
+    KVS_ERROR_NOT_INITIALIZED = -1,     // Библиотека не была инициализирована
+    KVS_ERROR_ALREADY_INITIALIZED = -2, // Библиотека уже была успешно инициализирована
+    KVS_ERROR_INVALID_PARAM = -3,       // Передан некорректный параметр (например, NULL, неверный размер)
+    KVS_ERROR_KEY_NOT_FOUND = -4,       // Указанный ключ не найден
+    KVS_ERROR_KEY_ALREADY_EXISTS = -5,  // Ключ уже существует в хранилище
+    KVS_ERROR_BUFFER_TOO_SMALL = -6,    // Буфер для чтения значения слишком мал
+    KVS_ERROR_NO_SPACE = -7,            // В хранилище недостаточно места для записи
+    KVS_ERROR_STORAGE_FAILURE = -8,     // Неустранимая ошибка хранилища (повреждение данных, ошибка I/O)
+    KVS_ERROR_UNKNOWN = -9              // Неизвестная/неспецифическая ошибка
 } kvs_status;
 
 #define KVS_KEY_SIZE 128             // Размер ключа

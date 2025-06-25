@@ -208,11 +208,9 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
         return KVS_ERROR_NO_SPACE;
     }
 
-    // Шаг 2: Если ключ уже существует, удаляем его
+    // Шаг 2: Если ключ уже существует, возвращаем ошибку
     if (kvs_exists(key) == 1) {
-        if (kvs_delete(key) != KVS_SUCCESS) {
-            return KVS_ERROR_STORAGE_FAILURE;
-        }
+        return KVS_ERROR_KEY_ALREADY_EXISTS;
     }
 
     // Шаг 3: Выравниваем данные до размера word_size
@@ -281,6 +279,20 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
     temp_metadata.value_offset = data_offset;
 
     device->key_index[device->key_count++] = temp_key_entry;
+
+    // Перед тем, как записать данные на диск, проверяем соответствует ли страницы, в которые
+    // нужно записать данные биткарте, если не соответствуют, то очищаем их, в соответствие с биткартами
+    if (kvs_verify_and_prepare_region(metadata_offset,sizeof(kvs_metadata)) < 0) {
+        device->key_count--;
+        if (padded_buffer) free(padded_buffer);
+        return KVS_ERROR_STORAGE_FAILURE;
+    }
+
+    if (kvs_verify_and_prepare_region(data_offset,aligned_value_len) < 0) {
+        device->key_count--;
+        if (padded_buffer) free(padded_buffer);
+        return KVS_ERROR_STORAGE_FAILURE;
+    }
 
     if (kvs_write_region(device->fp, metadata_offset, &temp_metadata, sizeof(kvs_metadata)) < 0) {
         device->key_count--;

@@ -314,8 +314,8 @@ kvs_status kvs_init(size_t storage_size_bytes)
     size_t real_storage_size_bytes = align_up(storage_size_bytes,word_size);
 
     if (device) {
-        kvs_log("Предупреждение: KVS уже инициализирован. Выполняется деинициализация перед новым запуском.");
-        kvs_deinit();
+        kvs_log("Предупреждение: KVS уже инициализирован.");
+        return KVS_ERROR_ALREADY_INITIALIZED;
     }
 
     kvs_make_data_dir();

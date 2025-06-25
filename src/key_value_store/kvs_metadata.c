@@ -535,12 +535,11 @@ uint32_t kvs_gc(int clean_mod){
 
         // Фаза 1: Анализ и поиск страницы-жертвы
         uint32_t bitmap_size = device->superblock.bitmap_size_bytes;
-        uint8_t *valid_bitmap = malloc(bitmap_size);
+        uint8_t *valid_bitmap = calloc(1,bitmap_size);
         if (!valid_bitmap) {
             kvs_log("GC Ошибка: не удалось выделить память для valid_bitmap.");
             return 0;
         }
-        memset(valid_bitmap, 0, bitmap_size);
 
         // Заполняем биткарту, в которой: 1 - слово валидно, 0 - слово невалидно
         for( int i = 0; i < device->key_count; i++ ) {
@@ -600,7 +599,7 @@ uint32_t kvs_gc(int clean_mod){
             return 0;
         }
 
-        gc_item  items_to_move[device->key_count];
+        gc_item  *items_to_move = calloc(device->key_count,sizeof(gc_item));
         uint32_t items_count = 0;
         uint32_t buffer_offset_counter = 0;
         uint32_t victim_page_end = victim_page_start + device->superblock.page_size_bytes;
@@ -630,7 +629,7 @@ uint32_t kvs_gc(int clean_mod){
 
         // Фаза 3: Выполнение эвакуации
         if (items_count > 0) {
-            uint8_t *evacuation_buffer = malloc(live_data_on_page);
+            uint8_t *evacuation_buffer = calloc(1,live_data_on_page);
             if (!evacuation_buffer)
                 return 0;
 
@@ -679,12 +678,218 @@ uint32_t kvs_gc(int clean_mod){
         return device->superblock.page_size_bytes;
 
     }
+
     else if (clean_mod == CLEAN_METADATA){
 
+        // Фаза 1: Анализ и поиск страницы-жертвы для метаданных
+        uint32_t metadata_bitmap_size = device->superblock.metadata_bitmap_size_bytes;
+        uint8_t *valid_metadata_bitmap = calloc(1,metadata_bitmap_size);
+        if (!valid_metadata_bitmap) {
+            kvs_log("GC (Метаданные) Ошибка: не удалось выделить память для valid_bitmap.");
+            return 0;
+        }
+
+        // Создаем временную карту валидных слотов на основе текущего key_index
+        for (uint32_t i = 0; i < device->key_count; i++) {
+            if (is_key_valid(i) == 1) {
+                uint32_t slot_index = (device->key_index[i].metadata_offset - device->superblock.metadata_offset) / sizeof(kvs_metadata);
+                uint32_t byte_index = slot_index / 8;
+                uint8_t  bit_index  = slot_index % 8;
+                if (byte_index < metadata_bitmap_size) {
+                    valid_metadata_bitmap[byte_index] |= (1 << bit_index);
+                }
+            }
+        }
+
+        uint32_t live_metadata_on_page = 0;
+        uint32_t victim_page = kvs_find_victim_page(CLEAN_METADATA, valid_metadata_bitmap, metadata_bitmap_size, &live_metadata_on_page);
+
+        if (victim_page == UINT32_MAX) {
+            free(valid_metadata_bitmap);
+            kvs_log("GC (Метаданные): Не найдено подходящих для очистки страниц метаданных.");
+            return 0;
+        }
+
+        uint32_t victim_page_start = victim_page * device->superblock.page_size_bytes;
+
+        // Если на странице нет "живых" данных, просто стираем ее и пересобираем биткарты
+        if (live_metadata_on_page == 0) {
+            if (ssdmmc_sim_erase_page(device->fp, victim_page) < 0) {
+                free(valid_metadata_bitmap);
+                return 0;
+            }
+        } else {
+            // Фаза 2: Эвакуация "живых" метаданных со страницы-жертвы
+            uint8_t *evacuation_buffer = calloc(1,live_metadata_on_page);
+            if(!evacuation_buffer) {
+                free(valid_metadata_bitmap);
+                return 0;
+            }
+
+            uint32_t buffer_offset_counter = 0;
+            uint32_t slots_per_page = device->superblock.page_size_bytes / sizeof(kvs_metadata);
+            uint32_t start_slot = (victim_page_start - device->superblock.metadata_offset) / sizeof(kvs_metadata);
+
+            for (uint32_t i = 0; i < slots_per_page; i++) {
+                uint32_t current_slot = start_slot + i;
+                if (get_bit(valid_metadata_bitmap, current_slot) == 1) {
+                    uint32_t old_offset = device->superblock.metadata_offset + (current_slot * sizeof(kvs_metadata));
+                    kvs_read_region(device->fp, old_offset, evacuation_buffer + buffer_offset_counter, sizeof(kvs_metadata));
+                    buffer_offset_counter += sizeof(kvs_metadata);
+                }
+            }
+
+            // Стираем старую страницу ПОСЛЕ того, как скопировали из нее все живое
+            if (ssdmmc_sim_erase_page(device->fp, victim_page) < 0) {
+                free(evacuation_buffer);
+                free(valid_metadata_bitmap);
+                return 0;
+            }
+
+            // Записываем спасенные метаданные в новые свободные места
+            for (uint32_t i = 0; i < (live_metadata_on_page / sizeof(kvs_metadata)); i++) {
+                uint32_t new_meta_offset = kvs_find_free_metadata_offset();
+                if (new_meta_offset == UINT32_MAX) {
+                    kvs_log("GC (Метаданные) КРИТИЧЕСКАЯ ОШИБКА: нет места для эвакуации.");
+                    free(evacuation_buffer);
+                    free(valid_metadata_bitmap);
+                    return 0;
+                }
+                kvs_write_region(device->fp, new_meta_offset, evacuation_buffer + (i * sizeof(kvs_metadata)), sizeof(kvs_metadata));
+            }
+            free(evacuation_buffer);
+        }
+
+        free(valid_metadata_bitmap);
+
+        // Фаза 3: Полный пересбор служебных структур
+        kvs_log("GC (Метаданные): Запускаем полный пересбор служебных структур...");
+
+        // Перестраиваем биткарту метаданных с диска
+        if (kvs_metadata_bitmap_create() != KVS_INTERNAL_OK) return 0;
+
+        // Перестраиваем key_index, отбрасывая "мертвые" ссылки
+        if (build_key_index() != KVS_INTERNAL_OK) return 0;
+
+        // Перестраиваем биткарту данных.
+        if (kvs_bitmap_create() != KVS_INTERNAL_OK) return 0;
+
+        // Сохраняем все обновленные структуры на диск
+        if (kvs_persist_all_service_data() != KVS_INTERNAL_OK) return 0;
+
+        kvs_log("GC: Сборка мусора для метаданных и пересбор структур успешно завершены.");
+        return device->superblock.page_size_bytes;
+
     }
+
     else {
         kvs_log("Ошибка GC: Указан неверный режим очистки данных");
     }
 
     return 0;
+}
+
+kvs_internal_status kvs_verify_and_prepare_region(uint32_t offset, uint32_t size)
+{
+    // Шаг 1: Проверяем базовые условия и определяем, с какой областью работаем
+    if (!device) {
+        return KVS_INTERNAL_ERR_NULL_DEVICE;
+    }
+    if (size == 0) {
+        return KVS_INTERNAL_OK;
+    }
+
+    uint8_t *bitmap;
+    uint32_t word_size;
+    uint32_t area_start_offset;
+
+    // Определяем параметры в зависимости от того, где находится регион
+    if (offset >= device->superblock.data_offset && (offset + size) <= device->superblock.metadata_offset) {
+        // Работаем с областью пользовательских данных
+        bitmap = device->bitmap;
+        word_size = device->superblock.word_size_bytes;
+        area_start_offset = device->superblock.data_offset;
+    } else if (offset >= device->superblock.metadata_offset && (offset + size) <= device->superblock.superblock_backup_offset) {
+        // Работаем с областью метаданных
+        bitmap = device->metadata_bitmap;
+        word_size = sizeof(kvs_metadata);
+        area_start_offset = device->superblock.metadata_offset;
+    } else {
+        // Указан некорректный регион
+        return KVS_INTERNAL_ERR_INVALID_PARAM;
+    }
+
+    // Шаг 2: Итерируемся по всем страницам, затронутым регионом
+    uint32_t page_size = device->superblock.page_size_bytes;
+    uint32_t first_page = offset / page_size;
+    uint32_t last_page = (offset + size - 1) / page_size;
+
+    for (uint32_t p = first_page; p <= last_page; p++) {
+        uint32_t current_page_offset = p * page_size;
+        bool discrepancy_found = false;
+
+        // Шаг 3: Предварительная проверка страницы на несоответствия
+        for (uint32_t w_offset = 0; w_offset < page_size; w_offset += word_size) {
+            uint32_t current_word_abs_offset = current_page_offset + w_offset;
+
+            // Пропускаем слова, которые находятся за пределами запрошенного региона
+            if (current_word_abs_offset < offset || current_word_abs_offset >= (offset + size)) {
+                continue;
+            }
+
+            uint32_t word_index = (current_word_abs_offset - area_start_offset) / word_size;
+
+            if (get_bit(bitmap, word_index) == 0) {
+                // Биткарта говорит, что слово свободно. Проверяем, так ли это на самом деле.
+                if (is_data_region_empty(current_word_abs_offset, word_size) == 0) {
+                    // Найдено несоответствие. Бит свободен, но место занято мусором.
+                    // Дальше эту страницу проверять нет смысла, переходим к очистке.
+                    discrepancy_found = true;
+                    break;
+                }
+            }
+        }
+
+        // Шаг 4: Если найдено несоответствие, выполняем принудительную очистку
+        if (discrepancy_found) {
+            // Выделяем буфер под всю страницу
+            uint8_t *page_buffer = calloc(1, page_size);
+            if (!page_buffer) {
+                return KVS_INTERNAL_ERR_MALLOC_FAILED;
+            }
+
+            // Считываем всю страницу в буфер
+            if (kvs_read_region(device->fp, current_page_offset, page_buffer, page_size) < 0) {
+                free(page_buffer);
+                return KVS_INTERNAL_ERR_READ_FAILED;
+            }
+
+            // Проходим по буферу и очищаем все места, которые должны быть пустыми
+            for (uint32_t w_offset = 0; w_offset < page_size; w_offset += word_size) {
+                uint32_t current_word_abs_offset = current_page_offset + w_offset;
+                uint32_t word_index = (current_word_abs_offset - area_start_offset) / word_size;
+
+                if (get_bit(bitmap, word_index) == 0) {
+                    // Этот участок должен быть пуст, затираем его в буфере
+                    memset(page_buffer + w_offset, 0xFF, word_size);
+                }
+            }
+
+            // Стираем физическую страницу
+            if (ssdmmc_sim_erase_page(device->fp, p) < 0) {
+                free(page_buffer);
+                return KVS_INTERNAL_ERR_ERASE_FAILED;
+            }
+
+            // Записываем измененный (очищенный) буфер обратно
+            if (kvs_write_region(device->fp, current_page_offset, page_buffer, page_size) < 0) {
+                free(page_buffer);
+                return KVS_INTERNAL_ERR_WRITE_FAILED;
+            }
+
+            free(page_buffer);
+        }
+    }
+
+    return KVS_INTERNAL_OK;
 }
