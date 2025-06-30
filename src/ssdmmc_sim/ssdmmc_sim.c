@@ -1,5 +1,7 @@
 #include "ssdmmc_sim_internal.h"
 
+int g_write_countdown = -1;
+
 int ssdmmc_sim_read_word(FILE *fp, uint32_t page_num, uint32_t word_offset, void *word)
 {
     // Проверяем не выходят ли запрашиваемые данные за размер хранилища
@@ -32,6 +34,15 @@ int ssdmmc_sim_read_word(FILE *fp, uint32_t page_num, uint32_t word_offset, void
 
 int ssdmmc_sim_write_word(FILE *fp, uint32_t page_num, uint32_t word_offset, const void *word)
 {
+
+    if (g_write_countdown > 0) {
+        g_write_countdown--;
+        if (g_write_countdown == 0) {
+            printf("\n!!! СБОЙ ПИТАНИЯ (СИМУЛЯЦИЯ) !!!\n");
+            exit(1); // Аварийно завершаем программу
+        }
+    }
+
     // Проверяем не выходят ли запрашиваемые данные за размер хранилища
     if (page_num >= SSDMMC_SIM_PAGE_COUNT)
         return SSDMMC_ERR_INVALID_PAGE;
@@ -128,4 +139,22 @@ int ssdmmc_sim_format(FILE *fp){
 
     fflush(fp);
     return SSDMMC_OK;
+}
+
+int ssdmmc_sim_ensure_data_dir_exists(void) {
+    struct stat st = {0};
+    if (stat(SSDMMC_DATA_DIR, &st) == -1) {
+        if (mkdir(SSDMMC_DATA_DIR, 0777) != 0) {
+            return SSDMMC_ERR_MKDIR_FAILED;
+        }
+    }
+    return SSDMMC_OK;
+}
+
+const char* ssdmmc_sim_get_storage_filename(void) {
+    return SSDMMC_STORAGE_FILENAME;
+}
+
+void ssdmmc_sim_set_write_failure_countdown(int count) {
+    g_write_countdown = count;
 }

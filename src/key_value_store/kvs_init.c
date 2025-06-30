@@ -18,18 +18,16 @@ kvs_internal_status kvs_setup_device(size_t user_size_bytes) {
     uint32_t words_per_page      = ssdmmc_sim_get_words_per_page();
     uint32_t word_size           = ssdmmc_sim_get_word_size();
     uint32_t page_size           = words_per_page * word_size;
-    uint32_t superblock_size     = KVS_SUPERBLOCK_SIZE;
+    uint32_t superblock_size     = align_up(sizeof(kvs_superblock), word_size);
     uint32_t user_data_size      = align_up(user_size_bytes, word_size);
     uint32_t storage_size        = global_page_count * page_size;
     uint32_t superblock_backup_size = superblock_size;
 
-    // Шаг 3: Итеративно рассчитываем размеры служебных областей,
-    // так как они зависят друг от друга (размер CRC зависит от кол-ва ключей,
-    // а кол-во ключей - от размера метаданных, который остается после всех служебных областей).
+    // Шаг 3: Итеративно рассчитываем размеры служебных областей
     uint32_t metadata_size = 0, prev_metadata_size = 0;
     uint32_t bitmap_bytes, metadata_bitmap_bytes, page_rewrite_bytes, crc_region_bytes;
-    uint32_t total_words, total_page_count, user_page_count, page_crc_bytes, crc_fixed_bytes;
-    uint32_t max_keys, metadata_slot_crc_bytes;
+    uint32_t total_words, total_page_count, crc_fixed_bytes;
+    uint32_t max_keys, entry_crc_bytes;
 
     do {
         // На каждой итерации сохраняем предыдущий размер метаданных, чтобы понять, когда расчет стабилизируется
@@ -50,11 +48,9 @@ kvs_internal_status kvs_setup_device(size_t user_size_bytes) {
         page_rewrite_bytes = align_up(total_page_count * sizeof(uint32_t), 4);
 
         // Рассчитываем общий размер области CRC
-        crc_fixed_bytes = 5 * sizeof(uint32_t);
-        user_page_count = (user_data_size + page_size - 1) / page_size;
-        page_crc_bytes = user_page_count * sizeof(uint32_t);
-        metadata_slot_crc_bytes = max_keys * sizeof(uint32_t);
-        crc_region_bytes = align_up(crc_fixed_bytes + page_crc_bytes + metadata_slot_crc_bytes, 4);
+        crc_fixed_bytes = 5 * sizeof(uint32_t); // CRC для суперблоков, биткарт и счетчиков
+        entry_crc_bytes = max_keys * sizeof(uint32_t); // Единый массив CRC для всех записей
+        crc_region_bytes = align_up(crc_fixed_bytes + entry_crc_bytes, 4);
 
         // Финальный расчет размера области метаданных:
         // от всего пространства отнимаем все остальные области
@@ -78,7 +74,7 @@ kvs_internal_status kvs_setup_device(size_t user_size_bytes) {
     device->superblock.words_per_page             = words_per_page;
     device->superblock.page_size_bytes            = page_size;
     device->superblock.storage_size_bytes         = storage_size;
-    device->superblock.userdata_page_count        = user_page_count;
+    device->superblock.userdata_page_count        = (user_data_size + page_size - 1) / page_size;
     device->superblock.superblock_size_bytes      = superblock_size;
     device->superblock.bitmap_size_bytes          = bitmap_bytes;
     device->superblock.metadata_size_bytes        = metadata_size;
@@ -86,7 +82,6 @@ kvs_internal_status kvs_setup_device(size_t user_size_bytes) {
     device->superblock.metadata_bitmap_size_bytes = metadata_bitmap_bytes;
     device->superblock.last_data_word_checked     = 0;
     device->superblock.last_metadata_slot_checked = 0;
-
     device->superblock.bitmap_offset              = superblock_size;
     device->superblock.metadata_bitmap_offset     = superblock_size + bitmap_bytes;
     device->superblock.page_rewrite_offset        = superblock_size + bitmap_bytes + metadata_bitmap_bytes;
@@ -99,8 +94,7 @@ kvs_internal_status kvs_setup_device(size_t user_size_bytes) {
     device->bitmap                     = NULL;
     device->metadata_bitmap            = NULL;
     device->page_rewrite_count         = NULL;
-    device->page_crc.page_crc          = NULL;
-    device->page_crc.metadata_slot_crc = NULL;
+    device->page_crc.entry_crc         = NULL;
     device->key_index                  = NULL;
 
     // Проверяем, что в нашем хранилище будет место как минимум для KVS_MIN_NUM_METADATA метаданных
@@ -113,11 +107,10 @@ kvs_internal_status kvs_setup_device(size_t user_size_bytes) {
     device->bitmap                     = calloc(1, device->superblock.bitmap_size_bytes);
     device->metadata_bitmap            = calloc(1, device->superblock.metadata_bitmap_size_bytes);
     device->page_rewrite_count         = calloc(1, page_rewrite_bytes);
-    device->page_crc.page_crc          = calloc(1, device->superblock.userdata_page_count * sizeof(uint32_t));
-    device->page_crc.metadata_slot_crc = calloc(1, device->superblock.max_key_count * sizeof(uint32_t));
+    device->page_crc.entry_crc         = calloc(1, device->superblock.max_key_count * sizeof(uint32_t));
     device->key_index                  = calloc(1, device->superblock.max_key_count * sizeof(kvs_key_index_entry));
 
-    if (!device->bitmap || !device->metadata_bitmap || !device->page_rewrite_count || !device->page_crc.page_crc || !device->page_crc.metadata_slot_crc || !device->key_index) {
+    if (!device->bitmap || !device->metadata_bitmap || !device->page_rewrite_count || !device->page_crc.entry_crc || !device->key_index) {
         kvs_log("Ошибка: не удалось выделить память для служебных массивов");
         kvs_free_device();
         return KVS_INTERNAL_ERR_MALLOC_FAILED;
@@ -138,7 +131,7 @@ kvs_internal_status kvs_init_new(size_t storage_size_bytes) {
     }
 
     // Шаг 2: Создаем и открываем файл хранилища
-    device->fp = fopen(KVS_STORAGE_FILENAME, "wb+");
+    device->fp = fopen(ssdmmc_sim_get_storage_filename(), "wb+");
     if (!device->fp) {
         kvs_free_device();
         return KVS_INTERNAL_ERR_FILE_OPEN_FAILED;
@@ -177,7 +170,7 @@ kvs_internal_status kvs_load_existing(void) {
     kvs_log("Попытка загрузить существующее хранилище KVS");
 
     // Шаг 1: Пытаемся открыть файл
-    FILE* fp = fopen(KVS_STORAGE_FILENAME, "rb+");
+    FILE* fp = fopen(ssdmmc_sim_get_storage_filename(), "rb+");
     if (!fp) {
         return KVS_INTERNAL_ERR_FILE_OPEN_FAILED;
     }
@@ -197,38 +190,30 @@ kvs_internal_status kvs_load_existing(void) {
     device->metadata_bitmap            = NULL;
     device->key_index                  = NULL;
     device->bitmap                     = NULL;
-    device->page_crc.page_crc          = NULL;
-    device->page_crc.metadata_slot_crc = NULL;
-
-    uint32_t storage_size = device->superblock.page_size_bytes * device->superblock.global_page_count;
-    uint32_t backup_offset = storage_size - KVS_SUPERBLOCK_SIZE;
-    kvs_superblock primary_sb, backup_sb;
-    uint32_t primary_sb_crc, backup_sb_crc;
+    device->page_crc.entry_crc         = NULL;
 
     // Шаг 3: Читаем оба суперблока с диска
-    if (kvs_read_region(device->fp, backup_offset, &backup_sb, sizeof(kvs_superblock)) < 0) {
-        kvs_free_device();
-        return KVS_INTERNAL_ERR_READ_FAILED;
-    }
-    if (kvs_read_region(device->fp, 0, &primary_sb, sizeof(kvs_superblock)) < 0) {
-        kvs_free_device();
-        return KVS_INTERNAL_ERR_READ_FAILED;
-    }
+    uint32_t superblock_size = align_up(sizeof(kvs_superblock), device->superblock.word_size_bytes);
+    uint32_t storage_size = device->superblock.page_size_bytes * device->superblock.global_page_count;
+    uint32_t backup_offset = storage_size - superblock_size;
 
-    // Читаем CRC суперблока и CRC запасного суперблока
-
-    if (kvs_read_region(device->fp, backup_sb.page_crc_offset + sizeof(uint32_t), &backup_sb_crc, sizeof(uint32_t)) < 0) {
+    kvs_superblock primary_sb, backup_sb;
+    if (kvs_read_region(device->fp, backup_offset, &backup_sb, superblock_size) < 0) {
         kvs_free_device();
         return KVS_INTERNAL_ERR_READ_FAILED;
     }
-    if (kvs_read_region(device->fp, primary_sb.page_crc_offset, &primary_sb_crc, sizeof(uint32_t)) < 0) {
+    if (kvs_read_region(device->fp, 0, &primary_sb, superblock_size) < 0) {
         kvs_free_device();
         return KVS_INTERNAL_ERR_READ_FAILED;
     }
 
     // Шаг 4: Проверяем валидность обоих суперблоков
-    bool primary_valid = (primary_sb_crc == crc32_calc(&primary_sb,sizeof(kvs_superblock)));
-    bool backup_valid = (backup_sb_crc == crc32_calc(&backup_sb,sizeof(kvs_superblock)));
+    uint32_t primary_sb_crc = 0, backup_sb_crc = 0;
+    kvs_read_region(device->fp, primary_sb.page_crc_offset, &primary_sb_crc, sizeof(uint32_t));
+    kvs_read_region(device->fp, backup_sb.page_crc_offset + sizeof(uint32_t), &backup_sb_crc, sizeof(uint32_t));
+
+    bool primary_valid = (primary_sb_crc == crc32_calc(&primary_sb, sizeof(kvs_superblock)));
+    bool backup_valid = (backup_sb_crc == crc32_calc(&backup_sb, sizeof(kvs_superblock)));
 
     // Шаг 5: Выбираем, какой суперблок использовать
     if (primary_valid) {
@@ -236,7 +221,7 @@ kvs_internal_status kvs_load_existing(void) {
     } else if (backup_valid) {
         kvs_log("ВНИМАНИЕ: Основной суперблок поврежден! Восстанавливаем из резервной копии.");
         device->superblock = backup_sb;
-        if (kvs_write_region(device->fp, 0, &device->superblock, sizeof(kvs_superblock)) < 0) {
+        if (kvs_write_region(device->fp, 0, &device->superblock, device->superblock.superblock_size_bytes) < 0) {
             kvs_log("КРИТИЧЕСКАЯ ОШИБКА: Не удалось восстановить основной суперблок.");
             kvs_free_device();
             return KVS_INTERNAL_ERR_WRITE_FAILED;
@@ -247,10 +232,10 @@ kvs_internal_status kvs_load_existing(void) {
         return KVS_INTERNAL_ERR_CORRUPT_SUPERBLOCK;
     }
 
-    // Шаг 6: Теперь, когда у нас есть валидный суперблок, читаем CRC
-    device->page_crc.page_crc = calloc(1, device->superblock.userdata_page_count * sizeof(uint32_t));
-    device->page_crc.metadata_slot_crc = calloc(1, device->superblock.max_key_count * sizeof(uint32_t));
-    if (!device->page_crc.page_crc || !device->page_crc.metadata_slot_crc) {
+
+    // Шаг 6: Теперь, когда у нас есть валидный суперблок, выделяем память и читаем служебные данные
+    device->page_crc.entry_crc = calloc(1, device->superblock.max_key_count * sizeof(uint32_t));
+    if (!device->page_crc.entry_crc) {
         kvs_free_device();
         return KVS_INTERNAL_ERR_MALLOC_FAILED;
     }
@@ -259,7 +244,6 @@ kvs_internal_status kvs_load_existing(void) {
         return KVS_INTERNAL_ERR_READ_FAILED;
     }
 
-    // Шаг 7: Выделяем память под остальные служебные структуры
     uint32_t rewrite_size = device->superblock.page_crc_offset - device->superblock.page_rewrite_offset;
     device->bitmap = calloc(1, device->superblock.bitmap_size_bytes);
     device->metadata_bitmap = calloc(1, device->superblock.metadata_bitmap_size_bytes);
@@ -270,7 +254,6 @@ kvs_internal_status kvs_load_existing(void) {
         return KVS_INTERNAL_ERR_MALLOC_FAILED;
     }
 
-    // Шаг 8: Читаем все остальные служебные области с диска
     if (kvs_read_region(device->fp, device->superblock.bitmap_offset, device->bitmap, device->superblock.bitmap_size_bytes) < 0) {
         kvs_free_device();
         return KVS_INTERNAL_ERR_READ_FAILED;
@@ -283,24 +266,36 @@ kvs_internal_status kvs_load_existing(void) {
         return KVS_INTERNAL_ERR_READ_FAILED;
     }
 
-    // Шаг 9: Проверяем и при необходимости восстанавливаем служебные области
-    if (is_bitmap_valid() != 1) {
-        if (kvs_bitmap_create() < 0) { kvs_free_device();
-            return KVS_INTERNAL_ERR_WRITE_FAILED; }
-    }
+    // Шаг 7: Проверяем и при необходимости восстанавливаем служебные области
     if (is_metadata_bitmap_valid() != 1) {
-        if (kvs_metadata_bitmap_create() < 0) { kvs_free_device();
-            return KVS_INTERNAL_ERR_WRITE_FAILED; }
-    }
-    if (is_page_rewrite_count_valid() != 1) {
-        if (kvs_clear_region(device->fp, device->superblock.page_rewrite_offset, rewrite_size) < 0) { kvs_free_device();
-            return KVS_INTERNAL_ERR_WRITE_FAILED; }
+        kvs_log("Биткарта метаданных повреждена, пересоздаем...");
+        if (kvs_metadata_bitmap_create() < 0) {
+            kvs_free_device();
+            return KVS_INTERNAL_ERR_WRITE_FAILED;
+        }
     }
 
-    // Шаг 10: Строим key_index ключей в ОЗУ
+    // Шаг 8: Строим key_index ключей в ОЗУ.
     if (build_key_index() < 0) {
         kvs_free_device();
         return KVS_INTERNAL_ERR_READ_FAILED;
+    }
+
+    // Шаг 9: Теперь, имея надежный key_index, проверяем и восстанавливаем битовую карту данных.
+    if (is_bitmap_valid() != 1) {
+        kvs_log("Биткарта данных повреждена, пересоздаем...");
+        if (kvs_bitmap_create() < 0) {
+            kvs_free_device();
+            return KVS_INTERNAL_ERR_WRITE_FAILED;
+        }
+    }
+
+    if (is_page_rewrite_count_valid() != 1) {
+        kvs_log("Счетчики перезаписи повреждены, сбрасываем...");
+        if (kvs_clear_region(device->fp, device->superblock.page_rewrite_offset, rewrite_size) < 0) {
+            kvs_free_device();
+            return KVS_INTERNAL_ERR_WRITE_FAILED;
+        }
     }
 
     kvs_log("Существующее хранилище успешно загружено и проверено");
@@ -309,42 +304,56 @@ kvs_internal_status kvs_load_existing(void) {
 
 kvs_status kvs_init(size_t storage_size_bytes)
 {
-
+    // Выравниваем запрошенный размер до размера слова
     uint32_t word_size = ssdmmc_sim_get_word_size();
     size_t real_storage_size_bytes = align_up(storage_size_bytes,word_size);
 
+    // Проверяем, не была ли библиотека уже инициализирована
     if (device) {
         kvs_log("Предупреждение: KVS уже инициализирован.");
         return KVS_ERROR_ALREADY_INITIALIZED;
     }
 
-    kvs_make_data_dir();
+    // Создаем директорию для хранения данных, если ее нет
+    if (ssdmmc_sim_ensure_data_dir_exists() != SSDMMC_OK) {
+        kvs_log("КРИТИЧЕСКАЯ ОШИБКА: Не удалось создать директорию для данных.");
+        return KVS_ERROR_STORAGE_FAILURE;
+    }
 
+    // Записываем разделитель в лог-файл для удобства чтения
     FILE *log_fp = fopen(KVS_LOG_FILENAME,"a");
     if(log_fp){
         fprintf(log_fp,"\n------------------------------ НОВЫЙ ЗАПУСК ------------------------------\n\n");
         fflush(log_fp);
         fclose(log_fp);
     }
+
+    // Пытаемся загрузить существующее хранилище
     if (kvs_load_existing() == KVS_INTERNAL_OK) {
         kvs_log("Инициализация завершена: загружено существующее хранилище");
         return KVS_SUCCESS;
     }
-    kvs_log("Существующее хранилище не найдено или повреждено, создаем новое");
+
+
     if (kvs_init_new(real_storage_size_bytes) == KVS_INTERNAL_OK) {
         kvs_log("Инициализация завершена: создано новое хранилище");
         return KVS_SUCCESS;
     }
-    kvs_log("Ошибка: не удалось инициализировать KVS");
+
+    // Если произошла любая другая ошибка при загрузке (повреждение и т.д.), сообщаем о сбое
+    kvs_log("Ошибка: не удалось инициализировать KVS из-за повреждения или другой ошибки.");
     kvs_free_device();
     return KVS_ERROR_STORAGE_FAILURE;
 }
 
 void kvs_deinit(void)
 {
+    // Если устройство не было инициализировано, ничего не делаем
     if (!device) {
         return;
     }
+
+    // Сохраняем все служебные данные и освобождаем ресурсы
     kvs_log("Деинициализация KVS...");
     if (kvs_persist_all_service_data() < 0) {
         kvs_log("Внимание: не удалось сохранить финальное состояние служебных данных перед деинициализацией.");

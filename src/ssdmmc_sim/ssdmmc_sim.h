@@ -11,6 +11,7 @@ typedef enum {
     SSDMMC_ERR_SEEK_FAILED = -4,     // Ошибка позиционирования в файле
     SSDMMC_ERR_IO_FAILED = -5,       // Ошибка чтения/записи
     SSDMMC_ERR_MALLOC_FAILED = -6,   // Ошибка выделения памяти
+    SSDMMC_ERR_MKDIR_FAILED = -7     // Ошибка создания директории
 } ssdmmc_status_t;
 
 
@@ -53,6 +54,19 @@ uint32_t ssdmmc_sim_get_words_per_page(void);
 
 // Возвращает размер одного слова в байтах.
 uint32_t ssdmmc_sim_get_word_size(void);
+
+// Проверяет существование директории для данных и создает ее, если она отсутствует.
+// Возвращает SSDMMC_OK при успехе или SSDMMC_ERR_MKDIR_FAILED при ошибке.
+int ssdmmc_sim_ensure_data_dir_exists(void);
+
+// Возвращает константную строку с именем файла хранилища.
+const char* ssdmmc_sim_get_storage_filename(void);
+
+// Устанавливает обратный отсчет операций записи, после которого симулятор
+// аварийно завершит работу, имитируя внезапное отключение питания.
+// count - количество операций ssdmmc_sim_write_word, которые должны успешно
+//         выполниться перед сбоем. Если count < 0, таймер отключается.
+void ssdmmc_sim_set_write_failure_countdown(int count);
 
 
 #endif

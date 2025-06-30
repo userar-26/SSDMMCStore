@@ -23,13 +23,11 @@ int kvs_exists(const void *key)
         int n = memcmp(device->key_index[mid].key, key, KVS_KEY_SIZE);
 
         if (n == 0) {
-            // Шаг 3: Ключ найден в key_index. Проверяем, валиден ли он на самом деле.
-            // Если ключ помечен как невалидный, для пользователя его не существует.
+            // Шаг 3: Ключ найден в key_index. Проверяем его валидность
             return is_key_valid(mid) == 1 ? 1 : 0;
         } else if (n < 0) {
             left = mid + 1;
         } else {
-            // Защита от переполнения переменной
             if (mid == 0) {
                 break;
             }
@@ -71,7 +69,7 @@ kvs_status kvs_delete(const void *key) {
         }
     }
 
-    // Шаг 3: Проверяем, что ключ был найден и он валиден
+    // Шаг 3: Проверяем, что ключ был найден и он полностью валиден
     if (!found || is_key_valid(mid) != 1) {
         return KVS_ERROR_KEY_NOT_FOUND;
     }
@@ -83,7 +81,7 @@ kvs_status kvs_delete(const void *key) {
         return KVS_ERROR_STORAGE_FAILURE;
     }
 
-    // Шаг 5: Физически очищаем области на диске
+    // Шаг 5: Физически очищаем на диске область данных и область метаданных
     uint32_t aligned_value_len = align_up(temp_metadata.value_size, device->superblock.word_size_bytes);
     if (kvs_clear_region(device->fp, temp_metadata.value_offset, aligned_value_len) < 0) {
         return KVS_ERROR_STORAGE_FAILURE;
@@ -92,28 +90,23 @@ kvs_status kvs_delete(const void *key) {
         return KVS_ERROR_STORAGE_FAILURE;
     }
 
-    // Шаг 6: Обновляем все служебные структуры в ОЗУ
+    // Шаг 6: Обновляем служебные структуры в ОЗУ
     uint32_t slot_index = (metadata_offset - device->superblock.metadata_offset) / sizeof(kvs_metadata);
-    if (kvs_update_single_metadata_crc(slot_index) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
+
     if (bitmap_clear_metadata_slot(slot_index) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
-    if (crc_update_region(temp_metadata.value_offset, aligned_value_len) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
+        kvs_log("KVS_DELETE ВНИМАНИЕ: Не удалось сбросить бит в биткарте метаданных для слота %u", slot_index);
     }
     if (rewrite_count_increment_region(metadata_offset, sizeof(kvs_metadata)) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
+        kvs_log("KVS_DELETE ВНИМАНИЕ: Не удалось увеличить счетчик перезаписи для метаданных");
     }
     if (rewrite_count_increment_region(temp_metadata.value_offset, aligned_value_len) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
+        kvs_log("KVS_DELETE ВНИМАНИЕ: Не удалось увеличить счетчик перезаписи для данных");
     }
     if (bitmap_clear_region(temp_metadata.value_offset, aligned_value_len) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
+        kvs_log("KVS_DELETE ВНИМАНИЕ: Не удалось сбросить биты в битовой карте данных");
     }
 
-    // Шаг 7: Удаляем ключ из key_index в ОЗУ
+    // Шаг 7: Удаляем ключ из кеша key_index в ОЗУ
     for (uint32_t i = mid; i < device->key_count - 1; i++) {
         device->key_index[i] = device->key_index[i+1];
     }
@@ -159,7 +152,7 @@ kvs_status kvs_get(const void *key, void *value, size_t *value_len)
         }
     }
 
-    // Шаг 3: Проверяем, что ключ был найден и валиден
+    // Шаг 3: Проверяем, что ключ был найден и он полностью валиден
     if (!found || is_key_valid(mid) != 1) {
         return KVS_ERROR_KEY_NOT_FOUND;
     }
@@ -170,13 +163,13 @@ kvs_status kvs_get(const void *key, void *value, size_t *value_len)
         return KVS_ERROR_STORAGE_FAILURE;
     }
 
-    // Шаг 5: Проверяем размер буфера пользователя
+    // Шаг 5: Проверяем, достаточно ли велик буфер пользователя
     if (*value_len < temp_metadata.value_size) {
         *value_len = temp_metadata.value_size;
         return KVS_ERROR_BUFFER_TOO_SMALL;
     }
 
-    // Шаг 6: Читаем данные с диска во временный буфер, кратный размеру word_size
+    // Шаг 6: Читаем данные с диска
     uint32_t aligned_value_len = align_up(temp_metadata.value_size, device->superblock.word_size_bytes);
     uint8_t *temp_buffer = calloc(1,aligned_value_len);
     if (!temp_buffer) {
@@ -187,7 +180,7 @@ kvs_status kvs_get(const void *key, void *value, size_t *value_len)
         return KVS_ERROR_STORAGE_FAILURE;
     }
 
-    // Шаг 7: Копируем данные в буфер пользователя и возвращаем результат
+    // Шаг 7: Копируем точное количество байт в буфер пользователя
     memcpy(value, temp_buffer, temp_metadata.value_size);
     free(temp_buffer);
     *value_len = temp_metadata.value_size;
@@ -213,61 +206,45 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
         return KVS_ERROR_KEY_ALREADY_EXISTS;
     }
 
-    // Шаг 3: Выравниваем данные до размера word_size
+    // Шаг 3: Выравниваем данные до размера слова
     uint32_t aligned_value_len = align_up(value_len, device->superblock.word_size_bytes);
     uint8_t *padded_buffer = NULL;
     const void *final_value = value;
     if (aligned_value_len != value_len) {
-
         padded_buffer = calloc(1,aligned_value_len);
-
         if (!padded_buffer) {
             return KVS_ERROR_STORAGE_FAILURE;
         }
-
         memcpy(padded_buffer, value, value_len);
         memset(padded_buffer + value_len, 0xFF, aligned_value_len - value_len);
         final_value = padded_buffer;
-
     }
 
-    // Шаг 4: Пытаемся найти место для метаданных. Если не находим, запускаем сборщик мусора.
+    // Шаг 4: Ищем место для метаданных. Если не находим, запускаем сборщик мусора.
     uint32_t metadata_offset = kvs_find_free_metadata_offset();
     while (metadata_offset == UINT32_MAX){
-
-        kvs_log("Нет места для метаданных, запускаем запускаем сборщик мусора...");
-
+        kvs_log("Нет места для метаданных, запускаем сборщик мусора...");
         if(kvs_gc(CLEAN_METADATA) == 0){
-
             kvs_log("После очистки всего мусора, не нашлось места для метаданных");
-            if (padded_buffer)
-                free(padded_buffer);
+            if (padded_buffer) free(padded_buffer);
             return KVS_ERROR_NO_SPACE;
-
         }
-
         metadata_offset = kvs_find_free_metadata_offset();
     }
 
-    // Шаг 5: Пытаемся найти место для данных. Если не находим, запускаем сборщик мусора.
+    // Шаг 5: Ищем место для данных. Если не находим, запускаем сборщик мусора.
     uint32_t data_offset = kvs_find_free_data_offset(aligned_value_len);
     while (data_offset == UINT32_MAX){
-
-        kvs_log("Нет места для данных, запускаем запускаем сборщик мусора...");
-
-        if(kvs_gc(CLEAN_DATA) == 0){
-
+        kvs_log("Нет места для данных, запускаем сборщик мусора...");
+        if( kvs_gc(CLEAN_DATA) == 0){
             kvs_log("После очистки всего мусора, не нашлось места для данных");
-            if (padded_buffer)
-                free(padded_buffer);
+            if (padded_buffer) free(padded_buffer);
             return KVS_ERROR_NO_SPACE;
-
         }
-
         data_offset = kvs_find_free_data_offset(aligned_value_len);
     }
 
-    // Шаг 6: Записываем данные и метаданные на диск, изначально помечая данные, как невалидные в ОЗУ
+    // Шаг 6: Записываем данные и метаданные на диск
     kvs_key_index_entry temp_key_entry;
     memcpy(temp_key_entry.key, key, KVS_KEY_SIZE);
     temp_key_entry.metadata_offset = metadata_offset;
@@ -280,13 +257,8 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
 
     device->key_index[device->key_count++] = temp_key_entry;
 
-    // Перед тем, как записать данные на диск, проверяем соответствует ли страницы, в которые
-    // нужно записать данные биткарте, если не соответствуют, то очищаем их, в соответствие с биткартами
-    if (kvs_verify_and_prepare_region(metadata_offset,sizeof(kvs_metadata)) < 0) {
-        device->key_count--;
-        if (padded_buffer) free(padded_buffer);
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
+    // Проверяем соответствует ли регион для записи биткарте данных
+    // если нет, то очищаем те места, которые помечены в биткарте как пустые
 
     if (kvs_verify_and_prepare_region(data_offset,aligned_value_len) < 0) {
         device->key_count--;
@@ -309,39 +281,39 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
         free(padded_buffer);
     }
 
-    // Шаг 7: Обновляем служебные структуры в ОЗУ, и делаем быструю сортировку key_index
+    // Шаг 7: Обновляем служебные структуры в ОЗУ
     qsort(device->key_index, device->key_count, sizeof(kvs_key_index_entry), kvs_key_index_entry_cmp);
     uint32_t slot_index = (metadata_offset - device->superblock.metadata_offset) / sizeof(kvs_metadata);
+
+    if (kvs_update_entry_crc(slot_index) < 0) {
+        kvs_log("KVS_PUT ВНИМАНИЕ: Не удалось обновить единый CRC для слота %u", slot_index);
+    }
+
+    if (bitmap_set_metadata_slot(slot_index) < 0) {
+        kvs_log("KVS_PUT ВНИМАНИЕ: Не удалось установить бит в биткарте метаданных для слота %u", slot_index);
+    }
+    if (rewrite_count_increment_region(metadata_offset, sizeof(kvs_metadata)) < 0) {
+        kvs_log("KVS_PUT ВНИМАНИЕ: Не удалось увеличить счетчик перезаписи для метаданных");
+    }
+    if (rewrite_count_increment_region(data_offset, aligned_value_len) < 0) {
+        kvs_log("KVS_PUT ВНИМАНИЕ: Не удалось увеличить счетчик перезаписи для данных");
+    }
+    if (bitmap_set_region(data_offset, aligned_value_len) < 0) {
+        kvs_log("KVS_PUT ВНИМАНИЕ: Не удалось установить биты в битовой карте данных");
+    }
+
+    // Помечаем ключ как валидный в ОЗУ
     for (uint32_t i = 0; i < device->key_count; i++) {
         if (device->key_index[i].metadata_offset == metadata_offset) {
             device->key_index[i].flags = 1;
             break;
         }
     }
-    if (kvs_update_single_metadata_crc(slot_index) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
-    if (bitmap_set_metadata_slot(slot_index) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
-    if (crc_update_region(data_offset, aligned_value_len) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
-    if (rewrite_count_increment_region(metadata_offset, sizeof(kvs_metadata)) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
-    if (rewrite_count_increment_region(data_offset, aligned_value_len) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
-    if (bitmap_set_region(data_offset, aligned_value_len) < 0) {
-        return KVS_ERROR_STORAGE_FAILURE;
-    }
 
-    // Шаг 7: Сохраняем все изменения в служебных структурах на диск
+    // Шаг 8: Сохраняем все изменения в служебных структурах на диск
     if (kvs_persist_all_service_data() < 0) {
         return KVS_ERROR_STORAGE_FAILURE;
     }
 
     return KVS_SUCCESS;
 }
-

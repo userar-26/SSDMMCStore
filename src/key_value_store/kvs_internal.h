@@ -39,9 +39,6 @@ void kvs_free_device();
 // Записывает сообщение в лог-файл библиотеки KVS.
 void kvs_log(const char *format, ...);
 
-// Создает директорию для хранения данных.
-void kvs_make_data_dir(void);
-
 // Выравнивает значение size вверх до ближайшего кратного align.
 uint32_t align_up(uint32_t size, uint32_t align);
 

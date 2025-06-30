@@ -20,13 +20,6 @@ void kvs_log(const char *format, ...) {
     fclose(log_file);
 }
 
-void kvs_make_data_dir(void) {
-    struct stat st = {0};
-    if (stat("../data", &st) == -1) {
-        mkdir("../data", 0777);
-    }
-}
-
 uint32_t align_up(uint32_t size, uint32_t align) {
     if (align == 0) return size;
     return ((size + align - 1) / align) * align;
@@ -42,11 +35,8 @@ void kvs_free_device() {
     if (device->key_index) {
         free(device->key_index);
     }
-    if (device->page_crc.metadata_slot_crc) {
-        free(device->page_crc.metadata_slot_crc);
-    }
-    if (device->page_crc.page_crc) {
-        free(device->page_crc.page_crc);
+    if (device->page_crc.entry_crc) {
+        free(device->page_crc.entry_crc);
     }
     if (device->page_rewrite_count) {
         free(device->page_rewrite_count);

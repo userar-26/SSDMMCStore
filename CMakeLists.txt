@@ -1,11 +1,9 @@
 cmake_minimum_required(VERSION 3.29)
 project(SSDMMCStore C)
 
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fprofile-arcs -ftest-coverage")
-set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fprofile-arcs")
-
 include_directories(include)
 include_directories(src/common)
+include_directories(tests)
 
 add_library(kvstore
         src/key_value_store/kvs.c
@@ -17,6 +15,8 @@ add_library(kvstore
         src/key_value_store/kvs_metadata.c
         src/key_value_store/kvs_valid.c)
 
-add_executable(main main.c)
+add_executable(main main.c
+        tests/kvs_test_wrappers.c
+        tests/kvs_test_wrappers.h)
 
 target_link_libraries(main kvstore)

@@ -148,8 +148,7 @@ kvs_internal_status kvs_clear_region(FILE *fp, uint32_t offset, uint32_t size)
 }
 
 kvs_internal_status kvs_read_crc_info(void) {
-
-    // Проверяем базовые условия
+    // Шаг 1: Проверяем базовые условия
     if (!device) {
         return KVS_INTERNAL_ERR_NULL_DEVICE;
     }
@@ -157,11 +156,10 @@ kvs_internal_status kvs_read_crc_info(void) {
     FILE *fp               = device->fp;
     uint32_t offset        = device->superblock.page_crc_offset;
     kvs_crc_info *crc_info = &device->page_crc;
-    uint32_t page_count    = device->superblock.userdata_page_count;
     uint32_t key_count     = device->superblock.max_key_count;
     uint32_t cur           = offset;
 
-    // Последовательно читаем каждое поле структуры CRC
+    // Шаг 2: Последовательно читаем каждое поле структуры CRC
     if (kvs_read_region(fp, cur, &crc_info->superblock_crc, sizeof(uint32_t)) < 0) {
         return KVS_INTERNAL_ERR_READ_FAILED;
     }
@@ -182,11 +180,9 @@ kvs_internal_status kvs_read_crc_info(void) {
         return KVS_INTERNAL_ERR_READ_FAILED;
     }
     cur += sizeof(uint32_t);
-    if (kvs_read_region(fp, cur, crc_info->page_crc, page_count * sizeof(uint32_t)) < 0) {
-        return KVS_INTERNAL_ERR_READ_FAILED;
-    }
-    cur += page_count * sizeof(uint32_t);
-    if (kvs_read_region(fp, cur, crc_info->metadata_slot_crc, key_count * sizeof(uint32_t)) < 0) {
+
+    // Шаг 3: Читаем единый массив CRC для всех записей
+    if (kvs_read_region(fp, cur, crc_info->entry_crc, key_count * sizeof(uint32_t)) < 0) {
         return KVS_INTERNAL_ERR_READ_FAILED;
     }
 
@@ -195,18 +191,17 @@ kvs_internal_status kvs_read_crc_info(void) {
 
 kvs_internal_status kvs_write_crc_info(void) {
 
-    // Проверяем базовые условия
+    // Шаг 1: Проверяем базовые условия
     if (!device) {
         return KVS_INTERNAL_ERR_NULL_DEVICE;
     }
     FILE *fp               = device->fp;
     uint32_t offset        = device->superblock.page_crc_offset;
     kvs_crc_info *crc_info = &device->page_crc;
-    uint32_t page_count    = device->superblock.userdata_page_count;
     uint32_t key_count     = device->superblock.max_key_count;
     uint32_t cur           = offset;
 
-    // Последовательно записываем каждое поле структуры CRC
+    // Шаг 2: Последовательно записываем каждое поле структуры CRC
     if (kvs_write_region(fp, cur, &crc_info->superblock_crc, sizeof(uint32_t)) < 0) {
         return KVS_INTERNAL_ERR_WRITE_FAILED;
     }
@@ -227,11 +222,9 @@ kvs_internal_status kvs_write_crc_info(void) {
         return KVS_INTERNAL_ERR_WRITE_FAILED;
     }
     cur += sizeof(uint32_t);
-    if (kvs_write_region(fp, cur, crc_info->page_crc, page_count * sizeof(uint32_t)) < 0) {
-        return KVS_INTERNAL_ERR_WRITE_FAILED;
-    }
-    cur += page_count * sizeof(uint32_t);
-    if (kvs_write_region(fp, cur, crc_info->metadata_slot_crc, key_count * sizeof(uint32_t)) < 0) {
+
+    // Шаг 3: Записываем единый массив CRC для всех записей
+    if (kvs_write_region(fp, cur, crc_info->entry_crc, key_count * sizeof(uint32_t)) < 0) {
         return KVS_INTERNAL_ERR_WRITE_FAILED;
     }
 
