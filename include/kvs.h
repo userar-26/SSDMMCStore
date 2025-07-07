@@ -46,6 +46,13 @@ kvs_status kvs_get(const void *key, void *value, size_t *value_len);
 // Возвращает KVS_SUCCESS при успехе, KVS_ERROR_NO_SPACE если нет места, или другой код ошибки.
 kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t value_len);
 
+// Обновляет значение для существующего ключа.
+// key       - ключ, значение которого нужно обновить.
+// value     - указатель на новые данные.
+// value_len - размер новых данных.
+// Возвращает KVS_SUCCESS при успехе или код ошибки.
+kvs_status kvs_update(const void *key, const void *value, size_t value_len);
+
 // Инициализирует KVS. Пытается загрузить существующее хранилище или создает новое.
 // storage_size_bytes - размер пользовательской области данных.
 // Возвращает KVS_SUCCESS при успехе или код ошибки.

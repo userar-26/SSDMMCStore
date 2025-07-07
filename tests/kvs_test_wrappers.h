@@ -28,5 +28,8 @@ void Kvs_delete(const void *key);
 // Проверяет существование ключа и выводит результат.
 void Kvs_exists(const void *key);
 
+// Обертка для kvs_update
+void Kvs_update(const void *key, const void *value, size_t value_len);
+
 
 #endif

@@ -317,3 +317,33 @@ kvs_status kvs_put(const void *key, size_t key_len, const void *value, size_t va
 
     return KVS_SUCCESS;
 }
+
+kvs_status kvs_update(const void *key, const void *value, size_t value_len) {
+
+    // Шаг 1: Проверка базовых параметров.
+    if (!device) {
+        return KVS_ERROR_NOT_INITIALIZED;
+    }
+    if (!key || !value || value_len == 0) {
+        return KVS_ERROR_INVALID_PARAM;
+    }
+
+    // Шаг 2: Сначала удаляем старую запись.
+    kvs_status delete_status = kvs_delete(key);
+
+    if (delete_status != KVS_SUCCESS) {
+        // Если удаление не удалось возвращаем ошибку.
+        return delete_status;
+    }
+
+    // Шаг 3: После успешного удаления, создаем новую запись с тем же ключом.
+    kvs_status put_status = kvs_put(key, KVS_KEY_SIZE, value, value_len);
+
+    if (put_status != KVS_SUCCESS) {
+        // Критическая ошибка: старые данные удалены, новые не записаны.
+        kvs_log("КРИТИЧЕСКАЯ ОШИБКА UPDATE: ключ '%s' был удален, но не смог быть записан заново. Код ошибки: %d", (char*)key, put_status);
+        return KVS_ERROR_STORAGE_FAILURE;
+    }
+
+    return KVS_SUCCESS;
+}

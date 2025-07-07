@@ -81,3 +81,7 @@ void Kvs_exists(const void *key) {
         printf("KVS_EXISTS: Ошибка проверки ключа '%.*s'. Причина: %s.\n", (int)strnlen(key, KVS_KEY_SIZE), (const char*)key, get_kvs_error_string((kvs_status)result));
     }
 }
+void Kvs_update(const void *key, const void *value, size_t value_len) {
+    kvs_status status = kvs_update(key, value, value_len);
+    printf("KVS_UPDATE: ключ '%s', результат: %s\n", (char*)key, status == KVS_SUCCESS ? "Успех" : "Ошибка");
+}
